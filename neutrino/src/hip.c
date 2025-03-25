@@ -5,6 +5,7 @@
  */
 
  #include "common.h" // for common headers
+ #define __HIP_PLATFORM_AMD__ // we only need HIP for AMD
  #include <hip/hip_runtime.h> // for AMD HIP Hooked APIs
  
  #define WARP_SIZE 64 // @bug some RDNA use 32 as WARP_SIZE
@@ -62,10 +63,10 @@
      CHECK_DL(); // checking if any dl error presented
      // initialzie the L2 Flush Memory if benchmark is enabled
      if (NEUTRINO_BENCHMARK) {
-         fprintf(log, "[benchmark] ENABLED L2 Flush Size %d\n", NEUTRINO_BENCHMARK_FLUSH_MEM_SIZE);
+         fprintf(event_log, "[benchmark] ENABLED L2 Flush Size %ld\n", NEUTRINO_BENCHMARK_FLUSH_MEM_SIZE);
          real_hipMalloc(&benchmark_flush_mem, NEUTRINO_BENCHMARK_FLUSH_MEM_SIZE);
      }
-     fprintf(log, "[info] init success\n"); 
+     fprintf(event_log, "[info] init success\n"); 
  }
  
  /**
@@ -99,10 +100,10 @@
              code = (const void*) image;
              code_type = PTX;
          } else { // still unrecognize, report the bug and terminates
-             fprintf(log, "[mod] hipModuleLoadData unrecognize %d\n", magic);
+             fprintf(event_log, "[mod] hipModuleLoadData unrecognize %d\n", magic);
          }
      } else {
-         fprintf(log, "[mod] hipModuleLoadData unsupported %s\n", code_types[code_type]);
+         fprintf(event_log, "[mod] hipModuleLoadData unsupported %s\n", code_types[code_type]);
      }
  
      // copy the image to a new managed and protected place
@@ -111,7 +112,7 @@
  
      hipError_t ret = real_hipModuleLoadData(module, image);
  
-     fprintf(log, "[mod] hipModuleLoadData mod %p code %p type %s size %zu\n", *module, image, code_types[code_type], size);
+     fprintf(event_log, "[mod] hipModuleLoadData mod %p code %p type %s size %zu\n", *module, image, code_types[code_type], size);
  
      // update to hashmap
      binmap_set(*module, managed_bin, size, NULL); // name = NULL as we don't know it now
@@ -123,12 +124,12 @@
      if (shared_lib == NULL) { init(); }
  
      // first parse the image
-     int magic, bin_type;
+     int magic, code_type;
      size_t size;
      const void *code;
      void *managed_bin;
      memcpy(&magic, image, sizeof(int));
-     code_types = check_magic(magic);
+     code_type = check_magic(magic);
  
      if (code_type == ELF) {
          Elf64_Ehdr header;
@@ -144,10 +145,10 @@
              code = (const void*) image;
              code_type = PTX;
          } else { // still unrecognize, report the bug and terminates
-             fprintf(log, "[mod] hipModuleLoadData unrecognize %d\n", magic);
+             fprintf(event_log, "[mod] hipModuleLoadData unrecognize %d\n", magic);
          }
      } else {
-         fprintf(log, "[mod] hipModuleLoadData unsupported %s\n", code_types[code_type]);
+         fprintf(event_log, "[mod] hipModuleLoadData unsupported %s\n", code_types[code_type]);
      }
  
      managed_bin = malloc(size);
@@ -155,7 +156,7 @@
  
      hipError_t ret = real_hipModuleLoadDataEx(module, image, numOptions, options, optionValues);
      
-     fprintf(log, "[mod] hipModuleLoadData mod %p code %p type %s size %zu\n", *module, image, code_types[code_type], size);
+     fprintf(event_log, "[mod] hipModuleLoadData mod %p code %p type %s size %zu\n", *module, image, code_types[code_type], size);
  
      // update to hashmap
      binmap_set(*module, managed_bin, size, NULL); // name = NULL as we don't know it now
@@ -174,12 +175,12 @@
      // call real function
      hipError_t result = real_hipModuleGetFunction(function, module, kname);
  
-     fprintf(log, "[mod] hipModuleGetFunction func %p mod %p name %s\n", *function, module, kname);
+     fprintf(event_log, "[mod] hipModuleGetFunction func %p mod %p name %s\n", *function, module, kname);
  
      // then update the key from module to function
      int hash_ret = binmap_update_name_key(module, *function, managed_name);
      if (hash_ret == -1)
-         fprintf(log, "[hash] hipModuleGetFunction failed-update %p %p %s\n", module, *function, managed_name);
+         fprintf(event_log, "[hash] hipModuleGetFunction failed-update %p %p %s\n", module, *function, managed_name);
      
      return result;
  }
@@ -198,7 +199,7 @@
      HIP_CHECK(real_hipEventRecord(start_event, stream)); // use the stream specified in param
  
      float prologue_time, kernel_time, epilogue_time;
-     hipErrot_t result;
+     hipError_t result;
      hipFunction_t probed, pruned;
      char* kernel_name;
      int n_param, n_probe; 
@@ -209,20 +210,20 @@
  
      // try obtain the kernel compiled or raise compilation process 
      // @note count and record is only valid if succeed == true
-     if (funcmap_get(f, &kernel_name, &n_param, &n_probe, &probe_sizes, &probe_types, &succeed, &probed, &pruned) == -1) {
-         fprintf(log, "[exec] funcmap-not-find %p\n", f);
-         fflush(log); // we need many fflush to avoid trace not printed
+     if (funcmap_get((void*)f, &kernel_name, &n_param, &n_probe, &probe_sizes, &probe_types, &succeed, (void**)&probed, (void**)&pruned) == -1) {
+         fprintf(event_log, "[exec] funcmap-not-find %p\n", f);
+         fflush(event_log); // we need many fflush to avoid trace not printed
          // here try to get binary from binmap and start JIT compile
          size_t size;
          void* bin;
          if (binmap_get(f, &size, &kernel_name, &bin) == -1) { // not found the binary, fall back
-             fprintf(log, "[jit] can't-find %p\n", f);
-             fflush(log);
+             fprintf(event_log, "[jit] can't-find %p\n", f);
+             fflush(event_log);
              funcmap_set(f,kernel_name, 0, 0, NULL, NULL, false, NULL, NULL); // set dummy with status FALSE
              goto backup;
          } else {
-             fprintf(log, "[jit] find %p name %s bin %p size %zu\n", f, kernel_name, bin, size);
-             fflush(log);
+             fprintf(event_log, "[jit] find %p name %s bin %p size %zu\n", f, kernel_name, bin, size);
+             fflush(event_log);
              // create a directory under the kernel directory with kernel_name
              // @note Linux has limit on directory length 255, replace it to sh1 so 20 char
              // @bugfix PyTorch kernel name usually is extremely long :(
@@ -232,14 +233,14 @@
              sprintf(folder_name, "%d_%s", kernel_idx, tmp);
              free(tmp);
              kernel_idx++;
-             fprintf(log, "[jit] rename %s %s\n", kernel_name, folder_name);
-             fflush(log);
+             fprintf(event_log, "[jit] rename %s %s\n", kernel_name, folder_name);
+             fflush(event_log);
              char* dir = malloc(strlen(KERNEL_DIR) + strlen(folder_name) + 10);
              sprintf(dir, "%s/%s", KERNEL_DIR, folder_name);
              if (mkdir(dir, 0755) == 0) { 
-                 fprintf(log, "[jit] mkdir %s\n", dir);
+                 fprintf(event_log, "[jit] mkdir %s\n", dir);
              } else {
-                 fprintf(log, "[jit] can't-mkdir %s\n", dir);
+                 fprintf(event_log, "[jit] can't-mkdir %s\n", dir);
                      funcmap_set(f, kernel_name, 0, 0, NULL, NULL, false, NULL, NULL); // set status FALSE to prevent recompile fault
                  goto backup;
              }
@@ -248,17 +249,17 @@
              sprintf(path, "%s/original.bin", dir);
              FILE* original_bin = fopen(path, "wb");
              if (original_bin == NULL) {
-                 fprintf(log, "[jit] can't-open %s\n", path);
+                 fprintf(event_log, "[jit] can't-open %s\n", path);
                      funcmap_set(f, kernel_name, 0, 0, NULL, NULL, false, NULL, NULL); // set status FALSE to prevent recompile fault
                  goto backup;
              }
              fwrite(bin, size, 1, original_bin);
              fclose(original_bin);
-             fprintf(log, "[jit] write %s\n", path);
+             fprintf(event_log, "[jit] write %s\n", path);
              // create subprocess to run process.py, be aware of multi-processing
              pid_t pid = fork();
              if (pid < 0) {
-                 fprintf(log, "[jit] can't-folk\n");
+                 fprintf(event_log, "[jit] can't-folk\n");
                  funcmap_set(f,kernel_name, 0, 0, NULL, NULL, false, NULL, NULL); // set status FALSE to prevent recompile fault
                  goto backup;
              } else if (pid == 0) { // child process, run python process.py kernel name
@@ -266,15 +267,15 @@
                  execlp(NEUTRINO_PYTHON, NEUTRINO_PYTHON, NEUTRINO_PROBING_PY, dir, kernel_name, NULL);
                  exit(EXIT_FAILURE); // reach here only if exec error -> failure
              } else { // parent process, wait for child
-                 fprintf(log, "[jit] subproc %s %s %s %s\n", NEUTRINO_PYTHON, NEUTRINO_PROBING_PY, dir, kernel_name);
+                 fprintf(event_log, "[jit] subproc %s %s %s %s\n", NEUTRINO_PYTHON, NEUTRINO_PROBING_PY, dir, kernel_name);
                  int status;
                  waitpid(pid, &status, 0);
                  if (status != EXIT_SUCCESS) { 
-                     fprintf(log, "[jit] python failed\n");
+                     fprintf(event_log, "[jit] python failed\n");
                      funcmap_set(f,kernel_name, 0, 0, NULL, NULL, false, NULL, NULL); // set dummy with status FALSE
                      goto backup; 
                  } else {
-                     fprintf(log, "[jit] python succeed\n");
+                     fprintf(event_log, "[jit] python succeed\n");
                  }
              }
              // read the kernel.info from file system
@@ -300,7 +301,7 @@
              *info_end = '\0';
              analyze_hook = strptr;
              // here read the 
-             fprintf(log, "[jit] read %s name %s n_param %d n_probe %d analyze_hook %s\n", path, kernel_name, n_param, n_probe, analyze_hook);
+             fprintf(event_log, "[jit] read %s name %s n_param %d n_probe %d analyze_hook %s\n", path, kernel_name, n_param, n_probe, analyze_hook);
              // load probed.bin -> for collecting runtime info
              sprintf(path, "%s/probed.bin", dir);
              void* probed_bin = readf(path, "rb");
@@ -315,8 +316,8 @@
              HIP_CHECK(real_hipModuleGetFunction(&pruned, pruned_mod, kernel_name));
              // add record to hashmap to avoid re-compile 
              funcmap_set(f, kernel_name, n_param, n_probe, probe_sizes, probe_types, true, probed, pruned);
-             fprintf(log, "[jit] finish %p name %s n_param %d\n", f, kernel_name, n_param);
-             fflush(log);
+             fprintf(event_log, "[jit] finish %p name %s n_param %d\n", f, kernel_name, n_param);
+             fflush(event_log);
              // free memory before we leave
              free(dir);
              free(path);
@@ -329,21 +330,21 @@
          }
      }
      // expose the original param
-     fprintf(log, "[exec] funcmap-find %p %s\n", f, succeed ? "success" : "fail");
+     fprintf(event_log, "[exec] funcmap-find %p %s\n", f, succeed ? "success" : "fail");
      // check the jit status, if failed, goto backup
      if (!succeed) { goto backup; }
  
      struct timespec ts;
      clock_gettime(CLOCK_REALTIME, &ts);
      long long time = ts.tv_nsec + ts.tv_sec * 1e9;
-     fprintf(log, "[exec] %lld param ", time);
+     fprintf(event_log, "[exec] %lld param ", time);
      for (int i = 0; i < n_param; i++) {
          // @note print raw value -> help check raw number but mostly pointers...
-         fprintf(log, "%llx ", *(hipDeviceptr_t*)kernelParams[i]);
+         fprintf(event_log, "%p ", *(hipDeviceptr_t*)kernelParams[i]);
      } 
-     fprintf(log, "\n");
-     fprintf(log, "[exec] grid %u %u %u block %u %u %u shared %u\n", gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes);
-     fflush(log);
+     fprintf(event_log, "\n");
+     fprintf(event_log, "[exec] grid %u %u %u block %u %u %u shared %u\n", gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes);
+     fflush(event_log);
  
      // here start to calculate memory size for every probe based on grid, block and probe_sizes
      // formula similar to ndarray based on grid, block / warp
@@ -355,15 +356,15 @@
      for (int idx = 0; idx < n_probe; idx++) {
          if (probe_types[idx] == PROBE_TYPE_THREAD) {
              probe_real_sizes[idx] = gridSize * blockSize * probe_sizes[idx];
-             fprintf(log, "[exec] grid %zu block %zu probe %d total %zu\n", gridSize, blockSize, probe_sizes[idx], probe_real_sizes[idx]);
+             fprintf(event_log, "[exec] grid %zu block %zu probe %d total %zu\n", gridSize, blockSize, probe_sizes[idx], probe_real_sizes[idx]);
          } else if (probe_types[idx] == PROBE_TYPE_WARP) {
              probe_real_sizes[idx] = gridSize * warpSize * probe_sizes[idx];
-             fprintf(log, "[exec] grid %zu warp  %zu probe %d total %zu\n", gridSize, warpSize, probe_sizes[idx], probe_real_sizes[idx]);
+             fprintf(event_log, "[exec] grid %zu warp  %zu probe %d total %zu\n", gridSize, warpSize, probe_sizes[idx], probe_real_sizes[idx]);
          }
          total_probe_sizes += probe_real_sizes[idx];
      }
  
-     fprintf(log, "[exec] probe-mem %zu (bytes)\n", total_probe_sizes);
+     fprintf(event_log, "[exec] probe-mem %zu (bytes)\n", total_probe_sizes);
      
      // Allocate Memory on Host and Device
      void** h_probe_mems = malloc(n_probe * sizeof(void*));
@@ -412,10 +413,10 @@
          free(d_probe_mems);
          free(probe_real_sizes);
          free(probe_args);
-         fprintf(log, "[exec] failed %d\n", result);
+         fprintf(event_log, "[exec] failed %d\n", result);
          goto backup;
      } else {
-         fprintf(log, "[exec] succeed %d\n", result);
+         fprintf(event_log, "[exec] succeed %d\n", result);
      }
  
      // dump to disk
@@ -430,7 +431,7 @@
      sprintf(DUMP_FILE_NAME, "%s/%.6f.bin", RESULT_DIR, elapsed);
      FILE *fp = fopen(DUMP_FILE_NAME, "wb");
      if (!fp) { 
-         fprintf(log, "[exec] can't-save %s\n", DUMP_FILE_NAME); 
+         fprintf(event_log, "[exec] can't-save %s\n", DUMP_FILE_NAME); 
          return hipSuccess; // only can't save, still success in execution
      }
      // write header to file
@@ -462,7 +463,7 @@
      }
      // close file
      fclose(fp);
-     fprintf(log, "[exec] save %s size %zu\n", DUMP_FILE_NAME, offset);
+     fprintf(event_log, "[exec] save %s size %zu\n", DUMP_FILE_NAME, offset);
      // free allocated memory before leave
      for (int idx = 0; idx < n_probe; idx++) {
          free(h_probe_mems[idx]);
@@ -485,27 +486,27 @@
          HIP_CHECK(real_hipEventSynchronize(end_event));
          // calculate the real kernel time
          HIP_CHECK(real_hipEventElapsedTime(&original_time, start_event, end_event));
-         fprintf(log, "[benchmark] prologue %f kernel %f epilogue %f original %f impact %f %d\n", prologue_time, kernel_time, epilogue_time, original_time, kernel_time / original_time, result);
+         fprintf(event_log, "[benchmark] prologue %f kernel %f epilogue %f original %f impact %f %d\n", prologue_time, kernel_time, epilogue_time, original_time, kernel_time / original_time, result);
      } else {
-         fprintf(log, "[exec] prologue %f kernel %f epilogue %f ratio %f\n", prologue_time, kernel_time, epilogue_time, (prologue_time + kernel_time + epilogue_time) / kernel_time);
+         fprintf(event_log, "[exec] prologue %f kernel %f epilogue %f ratio %f\n", prologue_time, kernel_time, epilogue_time, (prologue_time + kernel_time + epilogue_time) / kernel_time);
      }
  
      // @note do the analyze_hook if having
      if (strlen(analyze_hook) >= 3 && strcmp(analyze_hook + strlen(analyze_hook) - 3, ".py") == 0) {
          pid_t pid = fork();
          if (pid < 0) {
-             fprintf(log, "[jit] can't-folk\n");
+             fprintf(event_log, "[jit] can't-folk\n");
          } else if (pid == 0) { // child process, run python process.py kernel name
              execlp(NEUTRINO_PYTHON, NEUTRINO_PYTHON, analyze_hook, DUMP_FILE_NAME, NULL);
              exit(EXIT_FAILURE); // reach here only if exec error -> failure
          } else { // parent process, wait for child
-             fprintf(log, "[analyze] subproc %s %s %s\n", NEUTRINO_PYTHON, analyze_hook, DUMP_FILE_NAME);
+             fprintf(event_log, "[analyze] subproc %s %s %s\n", NEUTRINO_PYTHON, analyze_hook, DUMP_FILE_NAME);
              int status;
              waitpid(pid, &status, 0);
              if (status != EXIT_SUCCESS) { 
-                 fprintf(log, "[analyze] failed\n");
+                 fprintf(event_log, "[analyze] failed\n");
              } else {
-                 fprintf(log, "[analyze] succeed\n");
+                 fprintf(event_log, "[analyze] succeed\n");
              }
          }
      }
@@ -519,7 +520,7 @@
  
  backup:
      // fall back to original version
-     fprintf(log, "[exec] backup %u %u %u block %u %u %u shared %u\n", gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes);
+     fprintf(event_log, "[exec] backup %u %u %u block %u %u %u shared %u\n", gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes);
      result = real_hipModuleLaunchKernel(f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes, stream, kernelParams, extra);
      return result;
  }
@@ -533,7 +534,7 @@
      
      hipError_t result = real_hipMalloc(ptr, size);
  
-     fprintf(log, "[mem] hipMalloc %d dptr %llx bytesize %zu\n", result, *ptr, size);
+     fprintf(event_log, "[mem] hipMalloc %d dptr %p bytesize %zu\n", result, *ptr, size);
  
      return result;
  }
@@ -544,7 +545,7 @@
  
      hipError_t result = real_hipFree(ptr);
  
-     fprintf(log, "[mem] cuMemFree_v2 %d dptr %llx\n", result, ptr);
+     fprintf(event_log, "[mem] hipFree %d dptr %p\n", result, ptr);
      
      return result;
  }
@@ -555,10 +556,18 @@
  
      hipError_t result = real_hipModuleLoad(module, fname);
  
-     fprintf(log, "[mod] hipModuleLoad %d mod %llx name %s\n", *module, fname);
+     fprintf(event_log, "[mod] hipModuleLoad %d mod %p name %s\n", result, *module, fname);
      
      return result;
  }
+ 
+ // this is an undocumented API
+ //void __hipRegisterFunction(hip::FatBinaryInfo ** modules, const void * hostFunction, char * deviceFunction, const char * deviceName, unsigned int threadLimit, uint3 * tid, uint3 * bid, dim3 * blockDim, dim3 * gridDim, int * wSize) {
+ //    if (shared_lib == NULL) {init();}
+ //    void(*real)()
+ //}
+ 
+ //__hipRegisterFunction(hip::FatBinaryInfo ** modules, const void * hostFunction, char * deviceFunction, const char * deviceName, unsigned int threadLimit, uint3 * tid, uint3 * bid, dim3 * blockDim, dim3 * gridDim, int * wSize)
  
  // just for some parsing error, don't understand why HIP has such weird API
  hipError_t hipEventRecord(hipEvent_t event, hipStream_t stream) {
@@ -569,38 +578,39 @@
  
  const char* hipGetErrorName(hipError_t hip_error) { // Hi AMD, why hip_error here?
      if (shared_lib == NULL) { init(); }
-     hipError_t result = real_hipGetErrorName(hip_error);
+     const char* result = real_hipGetErrorName(hip_error);
      return result;
  }
  
  const char* hipGetErrorString(hipError_t hipError) { // Hi AMD, why hipError here?
      if (shared_lib == NULL) { init(); }
-     hipError_t result = real_hipGetErrorString(hipError);
+     const char* result = real_hipGetErrorString(hipError);
      return result;
  }
  
  const char* hipApiName(uint32_t id) {
      if (shared_lib == NULL) { init(); }
-     hipError_t result = real_hipApiName(id);
+     const char* result = real_hipApiName(id);
      return result;
  }
  
  const char* hipKernelNameRef(const hipFunction_t f) {
      if (shared_lib == NULL) { init(); }
-     hipError_t result = real_hipKernelNameRef(f);
+     const char* result = real_hipKernelNameRef(f);
      return result;
  }
  
  const char* hipKernelNameRefByPtr(const void* hostFunction, hipStream_t stream) {
      if (shared_lib == NULL) { init(); }
-     hipError_t result = real_hipKernelNameRefByPtr(hostFunction, stream);
+     const char* result = real_hipKernelNameRefByPtr(hostFunction, stream);
      return result;
  }
  
  /**
   * Unmodified part of code, automatically generated by parse.py
-  * usually we don't trace these API, just print a log to indicate they're used
+  * usually we don't trace these API, just print a event_log to indicate they're used
   * if there's any weird behavior caused by Neutrino (unlikely), we can have a look
   */
  #include "unmodified.c" // include the auto-generated code
+ 
  

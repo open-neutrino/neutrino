@@ -116,7 +116,8 @@ def main():
     # GNU LD_PRELOAD to overwrite dlopen, https://man7.org/linux/man-pages/man8/ld.so.8.html
     env["LD_PRELOAD"]          = os.path.join(NEUTRINO_BUILD_DIR, "preload.so")
     # Add to the LD_LIBRARY_PATH, this would overwrite ldconfig
-    env["LD_LIBRARY_PATH"]     = NEUTRINO_BUILD_DIR + ":" + env["LD_LIBRARY_PATH"]
+    if "LD_LIBRARY_PATH" in env: env["LD_LIBRARY_PATH"]     = NEUTRINO_BUILD_DIR + ":" + env["LD_LIBRARY_PATH"]
+    else:                        env["LD_LIBRARY_PATH"]     = NEUTRINO_BUILD_DIR
     # An Environmental Variable to enable the trace
     # NOTE some bugs here -> still working on
     env["NEUTRINO_ENABLE"] = "1"

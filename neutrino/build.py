@@ -19,10 +19,11 @@ if check_command("rocm-smi"):
     NEUTRINO_MODE = "HIP"
     NEUTRINO_DRIVER_HEADER_NAME = "hip/hip_runtime_api.h"
     NEUTRINO_IMPL_SRC = "hip.c"
-    NEUTRINO_HOOK_DRIVER_LIB_NAME = "libamdhip64.so.6"
+    NEUTRINO_HOOK_DRIVER_LIB_NAME = "libamdhip64.so.5"
     NEUTRINO_DRIVER_HEADER_SEARCH_PATH = [
         "/opt/rocm/include/", # AFAIK, add if new path is met
     ]
+    extra_flags = []
 elif check_command("nvidia-smi"):
     NEUTRINO_MODE = "CUDA"
     NEUTRINO_DRIVER_HEADER_NAME = "cuda.h"
@@ -33,6 +34,7 @@ elif check_command("nvidia-smi"):
         "/usr/local/cuda/targets/aarch64-linux/include/", # for ARM
         # add if missed
     ]
+    extra_flags = []
 else:
     raise RuntimeError("ONLY SUPPORT CUDA and HIP(AMD-ONLY)")
 
@@ -84,8 +86,8 @@ cmd = [PY, os.path.join(SRC_DIR, "parse.py"),
 print(" ".join(cmd), file=sys.stderr)
 subprocess.check_output(cmd)
 
-# NOTE compile cuda.c
-cmd = [CC, os.path.join(SRC_DIR, NEUTRINO_IMPL_SRC), "-fPIC", "-shared", "-ldl", "-O3", 
+# NOTE compile cuda.c / hip.c
+cmd = [CC, os.path.join(SRC_DIR, NEUTRINO_IMPL_SRC), "-fPIC", "-shared", "-ldl", "-O3", *extra_flags,
         "-I", NEUTRINO_DRIVER_HEADER_DIR, "-o", os.path.join(BUILD_DIR, NEUTRINO_HOOK_DRIVER_LIB_NAME)]
 print(" ".join(cmd), file=sys.stderr)
 subprocess.check_output(cmd)

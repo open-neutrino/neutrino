@@ -50,6 +50,8 @@
      if (!real_dlopen) 
          real_dlopen = dlsym(RTLD_NEXT, "dlopen");
      
+     fprintf(stderr, "dlopen: %s \n", filename);
+     fflush(stderr);
      if (!NEUTRINO_DRIVER_NAME) {
          NEUTRINO_DRIVER_NAME = getenv("NEUTRINO_DRIVER_NAME");
          fprintf(stderr, "[info] NEUTRINO_DRIVER_NAME: %s\n", NEUTRINO_DRIVER_NAME);
@@ -65,7 +67,8 @@
          if (strings != NULL){
              for (int i = 0; i < size; i++) {
                  // we will add ALL Nvidia Propietray Product here
-                 if (strstr(strings[i], "libcublas") != NULL) {
+                 fprintf(stderr, "stack %s \n", strings[i]);
+		 if (strstr(strings[i], "cublas") != NULL || strstr(strings[i], "rocblas") != NULL) {
                      call_from_cublas = 1;
                      break;
                  }

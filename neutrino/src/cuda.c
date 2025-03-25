@@ -143,10 +143,10 @@ static void init(void) {
     CHECK_DL(); // checking if any dl error presented
     // initialzie the L2 Flush Memory if benchmark is enabled
     if (NEUTRINO_BENCHMARK) {
-        fprintf(log, "[benchmark] ENABLED L2 Flush Size %ld\n", NEUTRINO_BENCHMARK_FLUSH_MEM_SIZE);
+        fprintf(event_log, "[benchmark] ENABLED L2 Flush Size %ld\n", NEUTRINO_BENCHMARK_FLUSH_MEM_SIZE);
         real_cuMemAlloc_v2(&benchmark_flush_mem, NEUTRINO_BENCHMARK_FLUSH_MEM_SIZE);
     }
-    fprintf(log, "[info] init success\n"); 
+    fprintf(event_log, "[info] init success\n"); 
 }
 
 /**
@@ -194,7 +194,7 @@ CUresult cuModuleLoadData(CUmodule* module, const void* image) {
             code = (const void*) image;
             code_type = PTX;
         } else { // still unrecognize, report the bug and terminates
-            fprintf(log, "[mod] cuModuleLoadData unrecognize %d\n", magic);
+            fprintf(event_log, "[mod] cuModuleLoadData unrecognize %d\n", magic);
         }
     }
     // copy the image to a new managed and protected place
@@ -204,7 +204,7 @@ CUresult cuModuleLoadData(CUmodule* module, const void* image) {
     // call the real function, after this, module will be valid
     CUresult result = real_cuModuleLoadData(module, image);
 
-    fprintf(log, "[mod] cuModuleLoadData %d module %p image %p type %s, size %zu\n", result, *module, image, code_types[code_type], size);
+    fprintf(event_log, "[mod] cuModuleLoadData %d module %p image %p type %s, size %zu\n", result, *module, image, code_types[code_type], size);
 
     // update to hashmap
     binmap_set(*module, managed_bin, size, NULL); // name = NULL as we don't know it now
@@ -250,7 +250,7 @@ CUresult cuModuleLoadDataEx(CUmodule* module, const void* image, unsigned int nu
             code = (const void*) image;
             code_type = PTX;
         } else { // still unrecognize, report the bug and terminates
-            fprintf(log, "[mod] cuModuleLoadDataEx unrecognize %d\n", magic);
+            fprintf(event_log, "[mod] cuModuleLoadDataEx unrecognize %d\n", magic);
         }
     }
     // copy the image to a new managed and protected place
@@ -259,7 +259,7 @@ CUresult cuModuleLoadDataEx(CUmodule* module, const void* image, unsigned int nu
     
     CUresult ret = real_cuModuleLoadDataEx(module, image, numOptions, options, optionValues);
     
-    fprintf(log, "[mod] cuModuleLoadDataEx mod %p code %p type %s size %zu\n", *module, image, code_types[code_type], size);
+    fprintf(event_log, "[mod] cuModuleLoadDataEx mod %p code %p type %s size %zu\n", *module, image, code_types[code_type], size);
 
     // update to hashmap
     binmap_set(*module, managed_bin, size, NULL); // name = NULL as we don't know it now
@@ -280,12 +280,12 @@ CUresult cuModuleGetFunction(CUfunction* hfunc, CUmodule hmod, const char* name)
     // call real function
     CUresult result = real_cuModuleGetFunction(hfunc, hmod, name);
 
-    fprintf(log, "[mod] cuModuleGetFunction func %p mod %p name %s\n", *hfunc, hmod, name);
+    fprintf(event_log, "[mod] cuModuleGetFunction func %p mod %p name %s\n", *hfunc, hmod, name);
 
     // then update the key from module to function
     int hash_ret = binmap_update_name_key(hmod, *hfunc, managed_name);
     if (hash_ret == -1)
-        fprintf(log, "[hash] cuModuleGetFunction failed-update %p %p %s\n", hmod, *hfunc, managed_name);
+        fprintf(event_log, "[hash] cuModuleGetFunction failed-update %p %p %s\n", hmod, *hfunc, managed_name);
     
     return result;
 }
@@ -296,12 +296,12 @@ CUresult cuKernelGetFunction(CUfunction* pFunc, CUkernel kernel) {
 
     CUresult result = real_cuKernelGetFunction(pFunc, kernel);
 
-    fprintf(log, "[mod] cuKernelGetFunction %p %p\n", *pFunc, kernel);
+    fprintf(event_log, "[mod] cuKernelGetFunction %p %p\n", *pFunc, kernel);
 
     // then update the key from kernel to function
     int hash_ret = binmap_update_key(kernel, *pFunc);
     if (hash_ret == -1) 
-        fprintf(log, "[hash] cuKernelGetFunction failed-update %p %p\n", kernel, *pFunc);
+        fprintf(event_log, "[hash] cuKernelGetFunction failed-update %p %p\n", kernel, *pFunc);
     
     return result;
 }
@@ -317,12 +317,12 @@ CUresult cuLibraryGetKernel(CUkernel* pKernel, CUlibrary library, const char* na
 
     CUresult result = real_cuLibraryGetKernel(pKernel, library, name);
 
-    fprintf(log, "[mod] cuLibraryGetKernel kernel %p lib %p name %s\n", *pKernel, library, name);
+    fprintf(event_log, "[mod] cuLibraryGetKernel kernel %p lib %p name %s\n", *pKernel, library, name);
 
     // then update the key from library to kernel
     int hash_ret = binmap_update_name_key(library, *pKernel, managed_name);
     if (hash_ret == -1) 
-        fprintf(log, "[hash] cuLibraryGetKernel failed-update %p %p %s\n", library, *pKernel, managed_name);
+        fprintf(event_log, "[hash] cuLibraryGetKernel failed-update %p %p %s\n", library, *pKernel, managed_name);
 
     return result;
 }
@@ -334,12 +334,12 @@ CUresult cuLibraryGetModule(CUmodule* pMod, CUlibrary library) {
 
     CUresult result = real_cuLibraryGetModule(pMod, library);
 
-    fprintf(log, "[mod] cuLibraryGetModule %d mod %p lib %p\n", result, *pMod, library);
+    fprintf(event_log, "[mod] cuLibraryGetModule %d mod %p lib %p\n", result, *pMod, library);
 
     // then update the key from library to kernel
     int hash_ret = binmap_update_key(library, *pMod);
     if (hash_ret == -1)
-        fprintf(log, "[hash] cuLibraryGetModule failed-update %p %p\n", library, *pMod);
+        fprintf(event_log, "[hash] cuLibraryGetModule failed-update %p %p\n", library, *pMod);
     
     return result;
 }
@@ -382,7 +382,7 @@ CUresult cuLibraryLoadData(CUlibrary* library, const void* code, CUjit_option* j
             bin = (const void*) code;
             bin_type = PTX;
         } else { // still unrecognize, wait for 
-            fprintf(log, "[Mod] cuLibraryLoadData unrecognize %d\n", magic);
+            fprintf(event_log, "[Mod] cuLibraryLoadData unrecognize %d\n", magic);
         }
     }
 
@@ -391,7 +391,7 @@ CUresult cuLibraryLoadData(CUlibrary* library, const void* code, CUjit_option* j
     memcpy(managed_bin, bin, size);
 
     CUresult result = real_cuLibraryLoadData(library, code, jitOptions, jitOptionsValues, numJitOptions, libraryOptions, libraryOptionValues, numLibraryOptions);
-    fprintf(log, "[mod] cuLibraryLoadData %d lib %p code %p type %s size %zu\n", result, *library, code, code_types[bin_type], size);
+    fprintf(event_log, "[mod] cuLibraryLoadData %d lib %p code %p type %s size %zu\n", result, *library, code, code_types[bin_type], size);
 
     // update to hashmap
     binmap_set(*library, managed_bin, size, NULL); // name = NULL as we don't know it now
@@ -429,19 +429,19 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
     // try obtain the kernel compiled or raise compilation process 
     // @note count and record is only valid if succeed == true
     if (funcmap_get((void*)f, &kernel_name, &n_param, &n_probe, &probe_sizes, &probe_types, &succeed, (void**)&probed, (void**)&pruned) == -1) {
-        fprintf(log, "[exec] funcmap-not-find %p\n", f);
-        fflush(log); // we need many fflush to avoid trace not printed
+        fprintf(event_log, "[exec] funcmap-not-find %p\n", f);
+        fflush(event_log); // we need many fflush to avoid trace not printed
         // here try to get binary from binmap and start JIT compile
         size_t size;
         void* bin;
         if (binmap_get(f, &size, &kernel_name, &bin) == -1) { // not found the binary, fall back
-            fprintf(log, "[jit] can't-find %p\n", f);
-            fflush(log);
+            fprintf(event_log, "[jit] can't-find %p\n", f);
+            fflush(event_log);
             funcmap_set(f,kernel_name, 0, 0, NULL, NULL, false, NULL, NULL); // set dummy with status FALSE
             goto backup;
         } else {
-            fprintf(log, "[jit] find %p name %s bin %p size %zu\n", f, kernel_name, bin, size);
-            fflush(log);
+            fprintf(event_log, "[jit] find %p name %s bin %p size %zu\n", f, kernel_name, bin, size);
+            fflush(event_log);
             // create a directory under the kernel directory with kernel_name
             // @note Linux has limit on directory length 255, replace it to sh1 so 20 char
             // @bugfix PyTorch kernel name usually is extremely long :(
@@ -451,14 +451,14 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
             sprintf(folder_name, "%d_%s", kernel_idx, tmp);
             free(tmp);
             kernel_idx++;
-            fprintf(log, "[jit] rename %s %s\n", kernel_name, folder_name);
-            fflush(log);
+            fprintf(event_log, "[jit] rename %s %s\n", kernel_name, folder_name);
+            fflush(event_log);
             char* dir = malloc(strlen(KERNEL_DIR) + strlen(folder_name) + 10);
             sprintf(dir, "%s/%s", KERNEL_DIR, folder_name);
             if (mkdir(dir, 0755) == 0) { 
-                fprintf(log, "[jit] mkdir %s\n", dir);
+                fprintf(event_log, "[jit] mkdir %s\n", dir);
             } else {
-                fprintf(log, "[jit] can't-mkdir %s\n", dir);
+                fprintf(event_log, "[jit] can't-mkdir %s\n", dir);
                     funcmap_set(f,kernel_name, 0, 0, NULL, NULL, false, NULL, NULL); // set dummy with status FALSE
                 goto backup;
             }
@@ -467,17 +467,17 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
             sprintf(path, "%s/original.bin", dir);
             FILE* original_bin = fopen(path, "wb");
             if (original_bin == NULL) {
-                fprintf(log, "[jit] can't-open %s\n", path);
+                fprintf(event_log, "[jit] can't-open %s\n", path);
                     funcmap_set(f,kernel_name, 0, 0, NULL, NULL, false, NULL, NULL); // set dummy with status FALSE
                 goto backup;
             }
             fwrite(bin, size, 1, original_bin);
             fclose(original_bin);
-            fprintf(log, "[jit] write %s\n", path);
+            fprintf(event_log, "[jit] write %s\n", path);
             // create subprocess to run process.py, be aware of multi-processing
             pid_t pid = fork();
             if (pid < 0) {
-                fprintf(log, "[jit] can't-folk\n");
+                fprintf(event_log, "[jit] can't-folk\n");
                 funcmap_set(f,kernel_name, 0, 0, NULL, NULL, false, NULL, NULL); // set dummy with status FALSE
                 goto backup;
             } else if (pid == 0) { // child process, run python process.py kernel name
@@ -485,15 +485,15 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
                 execlp(NEUTRINO_PYTHON, NEUTRINO_PYTHON, NEUTRINO_PROBING_PY, dir, kernel_name, NULL);
                 exit(EXIT_FAILURE); // reach here only if exec error -> failure
             } else { // parent process, wait for child
-                fprintf(log, "[jit] subproc %s %s %s %s\n", NEUTRINO_PYTHON, NEUTRINO_PROBING_PY, dir, kernel_name);
+                fprintf(event_log, "[jit] subproc %s %s %s %s\n", NEUTRINO_PYTHON, NEUTRINO_PROBING_PY, dir, kernel_name);
                 int status;
                 waitpid(pid, &status, 0);
                 if (status != EXIT_SUCCESS) { 
-                    fprintf(log, "[jit] python failed\n");
+                    fprintf(event_log, "[jit] python failed\n");
                     funcmap_set(f,kernel_name, 0, 0, NULL, NULL, false, NULL, NULL); // set dummy with status FALSE
                     goto backup; 
                 } else {
-                    fprintf(log, "[jit] python succeed\n");
+                    fprintf(event_log, "[jit] python succeed\n");
                 }
             }
             // read the kernel.info from file system
@@ -519,7 +519,7 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
             *info_end = '\0';
             analyze_hook = strptr;
             // here read the 
-            fprintf(log, "[jit] read %s name %s n_param %d n_probe %d analyze_hook %s\n", path, kernel_name, n_param, n_probe, analyze_hook);
+            fprintf(event_log, "[jit] read %s name %s n_param %d n_probe %d analyze_hook %s\n", path, kernel_name, n_param, n_probe, analyze_hook);
             // load probed.bin -> for collecting runtime info
             sprintf(path, "%s/probed.bin", dir);
             void* probed_bin = readf(path, "rb");
@@ -535,8 +535,8 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
             CUDA_CHECK(real_cuModuleGetFunction(&pruned, pruned_mod, kernel_name));
             // add record to hashmap to avoid re-compile 
             funcmap_set(f, kernel_name, n_param, n_probe, probe_sizes, probe_types, true, probed, pruned);
-            fprintf(log, "[jit] finish %p name %s n_param %d\n", f, kernel_name, n_param);
-            fflush(log);
+            fprintf(event_log, "[jit] finish %p name %s n_param %d\n", f, kernel_name, n_param);
+            fflush(event_log);
             // free memory before we leave
             free(dir);
             free(path);
@@ -549,7 +549,7 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
         }
     }
     // expose the original param
-    fprintf(log, "[exec] funcmap-find %p %s\n", f, succeed ? "success" : "fail");
+    fprintf(event_log, "[exec] funcmap-find %p %s\n", f, succeed ? "success" : "fail");
     // check the jit status, if failed, goto backup
     if (!succeed) { goto backup; }
 
@@ -557,14 +557,14 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     long long time = ts.tv_nsec + ts.tv_sec * 1e9;
-    fprintf(log, "[exec] %lld param ", time);
+    fprintf(event_log, "[exec] %lld param ", time);
     for (int i = 0; i < n_param; i++) {
         // @note print raw value -> help check raw number but mostly pointers...
-        fprintf(log, "%llx ", *(CUdeviceptr*)kernelParams[i]);
+        fprintf(event_log, "%llx ", *(CUdeviceptr*)kernelParams[i]);
     } 
-    fprintf(log, "\n");
-    fprintf(log, "[exec] grid %u %u %u block %u %u %u shared %u\n", gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes);
-    fflush(log);
+    fprintf(event_log, "\n");
+    fprintf(event_log, "[exec] grid %u %u %u block %u %u %u shared %u\n", gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes);
+    fflush(event_log);
 
     // here start to calculate memory size for every probe based on grid, block and probe_sizes
     // formula similar to ndarray based on grid, block / warp
@@ -576,15 +576,15 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
     for (int idx = 0; idx < n_probe; idx++) {
         if (probe_types[idx] == PROBE_TYPE_THREAD) {
             probe_real_sizes[idx] = gridSize * blockSize * probe_sizes[idx];
-            fprintf(log, "[exec] grid %zu block %zu probe %d total %zu\n", gridSize, blockSize, probe_sizes[idx], probe_real_sizes[idx]);
+            fprintf(event_log, "[exec] grid %zu block %zu probe %d total %zu\n", gridSize, blockSize, probe_sizes[idx], probe_real_sizes[idx]);
         } else if (probe_types[idx] == PROBE_TYPE_WARP) {
             probe_real_sizes[idx] = gridSize * warpSize * probe_sizes[idx];
-            fprintf(log, "[exec] grid %zu warp  %zu probe %d total %zu\n", gridSize, warpSize, probe_sizes[idx], probe_real_sizes[idx]);
+            fprintf(event_log, "[exec] grid %zu warp  %zu probe %d total %zu\n", gridSize, warpSize, probe_sizes[idx], probe_real_sizes[idx]);
         }
         total_probe_sizes += probe_real_sizes[idx];
     }
 
-    fprintf(log, "[exec] probe-mem %zu (bytes)\n", total_probe_sizes);
+    fprintf(event_log, "[exec] probe-mem %zu (bytes)\n", total_probe_sizes);
     
     // Allocate Memory on Host and Device
     void** h_probe_mems = malloc(n_probe * sizeof(void*));
@@ -633,10 +633,10 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
         free(d_probe_mems);
         free(probe_real_sizes);
         free(probe_args);
-        fprintf(log, "[exec] failed %d\n", result);
+        fprintf(event_log, "[exec] failed %d\n", result);
         goto backup;
     } else {
-        fprintf(log, "[exec] succeed %d\n", result);
+        fprintf(event_log, "[exec] succeed %d\n", result);
     }
 
     // dump to disk
@@ -651,7 +651,7 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
     sprintf(DUMP_FILE_NAME, "%s/%.6f.bin", RESULT_DIR, elapsed);
     FILE *fp = fopen(DUMP_FILE_NAME, "wb");
     if (!fp) { 
-        fprintf(log, "[exec] can't-save %s\n", DUMP_FILE_NAME); 
+        fprintf(event_log, "[exec] can't-save %s\n", DUMP_FILE_NAME); 
         return CUDA_SUCCESS; 
     }
     // write header to file
@@ -683,7 +683,7 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
     }
     // close file
     fclose(fp);
-    fprintf(log, "[exec] save %s size %zu\n", DUMP_FILE_NAME, offset);
+    fprintf(event_log, "[exec] save %s size %zu\n", DUMP_FILE_NAME, offset);
     // free allocated memory before leave
     for (int idx = 0; idx < n_probe; idx++) {
         free(h_probe_mems[idx]);
@@ -706,28 +706,28 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
         CUDA_CHECK(real_cuEventSynchronize(end_event));
         // calculate the real kernel time
         CUDA_CHECK(real_cuEventElapsedTime(&original_time, start_event, end_event));
-        fprintf(log, "[benchmark] prologue %f kernel %f epilogue %f original %f impact %f %d\n", prologue_time, kernel_time, epilogue_time, original_time, kernel_time / original_time, result);
+        fprintf(event_log, "[benchmark] prologue %f kernel %f epilogue %f original %f impact %f %d\n", prologue_time, kernel_time, epilogue_time, original_time, kernel_time / original_time, result);
     } else {
-        fprintf(log, "[exec] prologue %f kernel %f epilogue %f ratio %f\n", prologue_time, kernel_time, epilogue_time, (prologue_time + kernel_time + epilogue_time) / kernel_time);
+        fprintf(event_log, "[exec] prologue %f kernel %f epilogue %f ratio %f\n", prologue_time, kernel_time, epilogue_time, (prologue_time + kernel_time + epilogue_time) / kernel_time);
     }
 
     // @note do the analyze_hook
     if (strlen(analyze_hook) >= 3 && strcmp(analyze_hook + strlen(analyze_hook) - 3, ".py") == 0) {
         pid_t pid = fork();
         if (pid < 0) {
-            fprintf(log, "[jit] can't-folk\n");
+            fprintf(event_log, "[jit] can't-folk\n");
         } else if (pid == 0) { // child process, run python process.py kernel name
             // python process.py <work_dir> <kernel_name>
             execlp(NEUTRINO_PYTHON, NEUTRINO_PYTHON, analyze_hook, DUMP_FILE_NAME, NULL);
             exit(EXIT_FAILURE); // reach here only if exec error -> failure
         } else { // parent process, wait for child
-            fprintf(log, "[analyze] subproc %s %s %s\n", NEUTRINO_PYTHON, analyze_hook, DUMP_FILE_NAME);
+            fprintf(event_log, "[analyze] subproc %s %s %s\n", NEUTRINO_PYTHON, analyze_hook, DUMP_FILE_NAME);
             int status;
             waitpid(pid, &status, 0);
             if (status != EXIT_SUCCESS) { 
-                fprintf(log, "[analyze] failed\n");
+                fprintf(event_log, "[analyze] failed\n");
             } else {
-                fprintf(log, "[analyze] succeed\n");
+                fprintf(event_log, "[analyze] succeed\n");
             }
         }
     }
@@ -741,7 +741,7 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
 
 backup:
     // fall back to original version
-    fprintf(log, "[exec] backup %u %u %u block %u %u %u shared %u\n", gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes);
+    fprintf(event_log, "[exec] backup %u %u %u block %u %u %u shared %u\n", gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes);
     result = real_cuLaunchKernel(f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes, hStream, kernelParams, extra);
     return result;
 }
@@ -757,7 +757,7 @@ CUresult cuMemAlloc_v2(CUdeviceptr *dptr, size_t bytesize) {
 
     CUresult result = real_cuMemAlloc_v2(dptr, bytesize);
 
-    fprintf(log, "[mem] cuMemAlloc_v2 %d dptr %llx bytesize %zu\n", result, *dptr, bytesize);
+    fprintf(event_log, "[mem] cuMemAlloc_v2 %d dptr %llx bytesize %zu\n", result, *dptr, bytesize);
 
     return result;
 }
@@ -768,7 +768,7 @@ CUresult cuMemFree_v2(CUdeviceptr dptr) {
 
     CUresult result = real_cuMemFree_v2(dptr);
 
-    fprintf(log, "[mem] cuMemFree_v2 %d dptr %llx\n", result, dptr);
+    fprintf(event_log, "[mem] cuMemFree_v2 %d dptr %llx\n", result, dptr);
     
     return result;
 }
@@ -783,7 +783,7 @@ CUresult cuModuleLoad(CUmodule* module, const char* fname) {
     
     CUresult result = real_cuModuleLoad(module, fname); // call the symbol
 
-    fprintf(log, "[info] cuModuleLoad %d\n", result);
+    fprintf(event_log, "[info] cuModuleLoad %d\n", result);
     
     return result;
 }
@@ -794,7 +794,7 @@ CUresult cuModuleLoadFatBinary(CUmodule* module, const void* fatCubin) {
     
     CUresult result = real_cuModuleLoadFatBinary(module, fatCubin); // call the symbol
 
-    fprintf(log, "[info] cuModuleLoadFatBinary %d\n", result);
+    fprintf(event_log, "[info] cuModuleLoadFatBinary %d\n", result);
     
     return result;
 }
@@ -802,7 +802,7 @@ CUresult cuModuleLoadFatBinary(CUmodule* module, const void* fatCubin) {
 
 /**
  * Unmodified part of code, automatically generated by parse.py
- * usually we don't trace these API, just print a log to indicate they're used
+ * usually we don't trace these API, just print a event_log to indicate they're used
  * if there's any weird behavior caused by Neutrino (unlikely), we can have a look
  */
 #include "unmodified.c" // include the auto-generated code
@@ -822,15 +822,15 @@ CUresult cuGetProcAddress_v2(const char* symbol, void** pfn, int cudaVersion, cu
         CUresult (*cuGetProcAddress_v2_ptr)(const char* symbol, void** pfn, int cudaVersion, cuuint64_t flags, CUdriverProcAddressQueryResult* symbolStatus) = cuGetProcAddress_v2;
         *pfn = cuGetProcAddress_v2_ptr;
         ret = CUDA_SUCCESS;
-        fprintf(log, "[pass] cuGetProcAddress_v2 %d %s %d return-myself\n", ret, symbol, cudaVersion); // unexpected func call
+        fprintf(event_log, "[pass] cuGetProcAddress_v2 %d %s %d return-myself\n", ret, symbol, cudaVersion); // unexpected func call
     } else if (strcmp(symbol, "cuGetExportTable") == 0) {
         // CUresult (*cuGetExportTable_ptr)(const void**, const CUuuid*) = cuGetExportTable;
         // *pfn = cuGetExportTable_ptr;
         ret = CUDA_ERROR_INVALID_VALUE;
-        fprintf(log, "[pass] cuGetProcAddress_v2 %d %s %d return-ours\n", ret, symbol, cudaVersion); // unexpected func call
+        fprintf(event_log, "[pass] cuGetProcAddress_v2 %d %s %d return-ours\n", ret, symbol, cudaVersion); // unexpected func call
     } else {
         ret = real_cuGetProcAddress_v2(symbol, pfn, cudaVersion, flags, symbolStatus);
-        fprintf(log, "[pass] cuGetProcAddress_v2 %d %s %d\n", ret, symbol, cudaVersion); // unexpected func call
+        fprintf(event_log, "[pass] cuGetProcAddress_v2 %d %s %d\n", ret, symbol, cudaVersion); // unexpected func call
     }
    
     return ret;
@@ -846,7 +846,7 @@ CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction f, void** ker
     char* NEUTRINO_ENABLE_STR = getenv("NEUTRINO_ENABLE");
     if (NEUTRINO_ENABLE_STR != NULL) {
         if (atoi(NEUTRINO_ENABLE_STR) != NEUTRINO_ENABLE) {
-            fprintf(log, "[exec] trace %s\n", atoi(NEUTRINO_ENABLE_STR) == 0 ? "disabled" : "enabled");
+            fprintf(event_log, "[exec] trace %s\n", atoi(NEUTRINO_ENABLE_STR) == 0 ? "disabled" : "enabled");
             NEUTRINO_ENABLE = atoi(NEUTRINO_ENABLE_STR);
         }
     }
@@ -860,7 +860,7 @@ CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction f, void** ker
     int n_param;
     bool succeed; // jit status
 
-    // make it compatible to our logging
+    // make it compatible to our event_logging
     unsigned int gridDimX = config->gridDimX;
     unsigned int gridDimY = config->gridDimY;
     unsigned int gridDimZ = config->gridDimZ;
@@ -872,19 +872,19 @@ CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction f, void** ker
     // try obtain the kernel compiled or raise compilation process 
     // @note count and record is only valid if succeed == true
     if (funcmap_get(f, &count, &record, &kernel_name, &n_param, &succeed) == -1) { // fall back to compile
-        fprintf(log, "[exec] funcmap-not-find %p\n", f);
-        fflush(log);
+        fprintf(event_log, "[exec] funcmap-not-find %p\n", f);
+        fflush(event_log);
         // get function from bin map
         size_t size;
         void* bin;
         if (binmap_get(f, &size, &kernel_name, &bin) == -1) { // not found the binary, fall back
-            fprintf(log, "[jit] can't-find %p\n", f);
-            fflush(log);
+            fprintf(event_log, "[jit] can't-find %p\n", f);
+            fflush(event_log);
             funcmap_set(f, NULL, NULL, kernel_name, 0, false); // set a dummy item
             goto backup;
         } else {
-            fprintf(log, "[jit] find %p name %s bin %p size %zu\n", f, kernel_name, bin, size);
-            fflush(log);
+            fprintf(event_log, "[jit] find %p name %s bin %p size %zu\n", f, kernel_name, bin, size);
+            fflush(event_log);
             // create a directory under the kernel directory with kernel_name
             // @note Linux has limit on directory length 255, replace it to sh1
             // @bugfix PyTorch kernel name usually is extremely long :(
@@ -895,14 +895,14 @@ CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction f, void** ker
             sprintf(folder_name, "%d_%s", kernel_idx, tmp);
             free(tmp);
             kernel_idx++;
-            fprintf(log, "[jit] rename %s %s\n", kernel_name, folder_name);
-            fflush(log);
+            fprintf(event_log, "[jit] rename %s %s\n", kernel_name, folder_name);
+            fflush(event_log);
             char* dir = malloc(strlen(KERNEL_DIR) + strlen(folder_name) + 10);
             sprintf(dir, "%s/%s", KERNEL_DIR, folder_name);
             if (mkdir(dir, 0755) == 0) { 
-                fprintf(log, "[jit] mkdir %s\n", dir);
+                fprintf(event_log, "[jit] mkdir %s\n", dir);
             } else {
-                fprintf(log, "[jit] can't-mkdir %s\n", dir);
+                fprintf(event_log, "[jit] can't-mkdir %s\n", dir);
                 funcmap_set(f, NULL, NULL, kernel_name, 0, false); // set a dummy item
                 goto backup;
             }
@@ -911,17 +911,17 @@ CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction f, void** ker
             sprintf(path, "%s/original.bin", dir);
             FILE* original_bin = fopen(path, "wb");
             if (original_bin == NULL) {
-                fprintf(log, "[jit] can't-open %s\n", path);
+                fprintf(event_log, "[jit] can't-open %s\n", path);
                 funcmap_set(f, NULL, NULL, kernel_name, 0, false); // set a dummy item
                 goto backup;
             }
             fwrite(bin, size, 1, original_bin);
             fclose(original_bin);
-            fprintf(log, "[jit] write %s\n", path);
+            fprintf(event_log, "[jit] write %s\n", path);
             // create subprocess to run process.py, be aware of multi-processing
             pid_t pid = fork();
             if (pid < 0) {
-                fprintf(log, "[jit] can't-folk\n");
+                fprintf(event_log, "[jit] can't-folk\n");
                 funcmap_set(f, NULL, NULL, kernel_name, 0, false); // set a dummy item
                 goto backup;
             } else if (pid == 0) { // child process, run python process.py kernel name
@@ -929,15 +929,15 @@ CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction f, void** ker
                 execlp(NEUTRINO_PYTHON, NEUTRINO_PYTHON, NEUTRINO_PROBING_PY, dir, kernel_name, NULL);
                 exit(EXIT_FAILURE); // reach here only if exec error -> failure
             } else { // parent process, wait for child
-                fprintf(log, "[jit] subproc %s %s %s %s\n", NEUTRINO_PYTHON, NEUTRINO_PROBING_PY, dir, kernel_name);
+                fprintf(event_log, "[jit] subproc %s %s %s %s\n", NEUTRINO_PYTHON, NEUTRINO_PROBING_PY, dir, kernel_name);
                 int status;
                 waitpid(pid, &status, 0);
                 if (status != EXIT_SUCCESS) { 
-                    fprintf(log, "[jit] python failed\n");
+                    fprintf(event_log, "[jit] python failed\n");
                     funcmap_set(f, NULL, NULL, kernel_name, 0, false); // set a dummy item
                     goto backup; 
                 } else {
-                    fprintf(log, "[jit] python succeed\n");
+                    fprintf(event_log, "[jit] python succeed\n");
                 }
             }
             // read the kernel.info from file system
@@ -951,7 +951,7 @@ CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction f, void** ker
             n_param = atoi(start + 1); // skip \n
             *start = '\0'; // make it NULL-Terminated
             kernel_name = kernel_info;
-            fprintf(log, "[jit] read %s name %s n_param %d\n", path, kernel_name, n_param);
+            fprintf(event_log, "[jit] read %s name %s n_param %d\n", path, kernel_name, n_param);
             // load count.bin and record.bin
             sprintf(path, "%s/count.bin", dir);
             void* count_bin = readf(path, "rb");
@@ -966,8 +966,8 @@ CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction f, void** ker
             CUDA_CHECK(real_cuModuleGetFunction(&record, record_mod, kernel_name));
             // place into hashmap to avoid re-compile 
             funcmap_set(f, count, record, kernel_name, n_param, true);
-            fprintf(log, "[jit] finish %p name %s n_param %d\n", f, kernel_name, n_param);
-            fflush(log);
+            fprintf(event_log, "[jit] finish %p name %s n_param %d\n", f, kernel_name, n_param);
+            fflush(event_log);
             // free memory before we leave
             free(dir);
             free(path);
@@ -979,7 +979,7 @@ CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction f, void** ker
         }
     }
     // expose the original param
-    fprintf(log, "[exec] funcmap-find %p %s\n", f, succeed ? "success" : "fail");
+    fprintf(event_log, "[exec] funcmap-find %p %s\n", f, succeed ? "success" : "fail");
     // check the jit status, if failed, goto backup
     if (!succeed) { goto backup; }
 
@@ -987,15 +987,15 @@ CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction f, void** ker
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     long long time = ts.tv_nsec + ts.tv_sec * 1e9;
-    fprintf(log, "[exec] %lld param ", time);
+    fprintf(event_log, "[exec] %lld param ", time);
     for (int i = 0; i < n_param; i++) {
-        fprintf(log, "%llx ", *(CUdeviceptr*)kernelParams[i]);
+        fprintf(event_log, "%llx ", *(CUdeviceptr*)kernelParams[i]);
     }
     // @bugfix: why Triton Matmul leads to 
     
-    fprintf(log, "\n");
-    fprintf(log, "[exec] grid %u %u %u block %u %u %u shared %u\n", gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes);
-    fflush(log);
+    fprintf(event_log, "\n");
+    fprintf(event_log, "[exec] grid %u %u %u block %u %u %u shared %u\n", gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes);
+    fflush(event_log);
 
     const size_t gridSize = gridDimX * gridDimY * gridDimZ;   
     const size_t blockSize = blockDimX * blockDimY * blockDimZ;
@@ -1014,20 +1014,20 @@ CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction f, void** ker
     if (result != CUDA_SUCCESS) {
         const char *msg;                  
 		real_cuGetErrorName(result, &msg);
-        fprintf(log, "[exec] count-failed %d %s\n", result, msg);
+        fprintf(event_log, "[exec] count-failed %d %s\n", result, msg);
         free(h_AccessCounter);
         free(count_args);
         CUDA_CHECK(real_cuMemFree_v2(d_AccessCounter));
         goto backup;
     } else {
-        // fprintf(log, "[exec] count %d size %zu\n", result, size_AccessCounter);
+        // fprintf(event_log, "[exec] count %d size %zu\n", result, size_AccessCounter);
     }
-    fflush(log);
+    fflush(event_log);
     result = real_cuMemcpyDtoH_v2(h_AccessCounter, d_AccessCounter, size_AccessCounter);
     if (result != CUDA_SUCCESS) {
         free(h_AccessCounter);
         free(count_args);
-        // fprintf(log, "[exec] count-fail-copy %d size %zu\n", result, size_AccessCounter);
+        // fprintf(event_log, "[exec] count-fail-copy %d size %zu\n", result, size_AccessCounter);
         fflush(stdout);
         CUDA_CHECK(real_cuMemFree_v2(d_AccessCounter));
         goto backup;
@@ -1043,7 +1043,7 @@ CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction f, void** ker
     // RECORD MEMORY ACCESS
     const size_t size_clock_record   = gridSize * maxAccessPerBlock * sizeof(uint64_t) * MARGIN_FACTOR;
     const size_t size_address_record = gridSize * maxAccessPerBlock * sizeof(uint64_t) * MARGIN_FACTOR;
-    // fprintf(log, "[exec] maxAccessPerBlock %u alloc %zu (KB)\n", maxAccessPerBlock, (size_clock_record + size_address_record) / 1024);
+    // fprintf(event_log, "[exec] maxAccessPerBlock %u alloc %zu (KB)\n", maxAccessPerBlock, (size_clock_record + size_address_record) / 1024);
     uint64_t *h_clock_record   = malloc(size_clock_record);
     uint64_t *h_address_record = malloc(size_address_record);
     CUdeviceptr d_clock_record, d_address_record;
@@ -1063,10 +1063,10 @@ CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction f, void** ker
         free(record_args);
         CUDA_CHECK(real_cuMemFree_v2(d_clock_record));
         CUDA_CHECK(real_cuMemFree_v2(d_address_record));
-        fprintf(log, "[exec] record-failed %d\n", result);
+        fprintf(event_log, "[exec] record-failed %d\n", result);
         goto backup;
     } else {
-        // fprintf(log, "[exec] record %d\n", result);
+        // fprintf(event_log, "[exec] record %d\n", result);
     }
     // copy and dump
     CUDA_CHECK(real_cuMemcpyDtoH_v2(h_clock_record,   d_clock_record,   size_clock_record));
@@ -1079,7 +1079,7 @@ CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction f, void** ker
     sprintf(DUMP_FILE_NAME, "%s/%.6f.bin", MEMORY_DIR, elapsed);
     FILE *fp = fopen(DUMP_FILE_NAME, "wb");
     if (!fp) { 
-        fprintf(log, "[exec] can't-save %s\n", DUMP_FILE_NAME); 
+        fprintf(event_log, "[exec] can't-save %s\n", DUMP_FILE_NAME); 
         return CUDA_SUCCESS; 
     }
     traceHeader header;
@@ -1105,7 +1105,7 @@ CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction f, void** ker
     fwrite(h_address_record, size_address_record, 1, fp);
     // close file
     fclose(fp);
-    fprintf(log, "[exec] save %s size %zu\n", DUMP_FILE_NAME, 
+    fprintf(event_log, "[exec] save %s size %zu\n", DUMP_FILE_NAME, 
         size_clock_record + size_address_record + sizeof(header));
     // free allocated memory before leave
     free(h_clock_record);
@@ -1117,7 +1117,7 @@ CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction f, void** ker
     return CUDA_SUCCESS;
 
 backup:
-    fprintf(log, "[exec] backup\n");
+    fprintf(event_log, "[exec] backup\n");
     // fall back to original version
     result = real_cuLaunchKernelEx(config, f, kernelParams, extra); // call the symbol
     return result;

@@ -1,7 +1,3 @@
-/**
- * Neutrino Hook Driver Commons
- * @note DON'T INCLUDE ANY POLATFORM-SPECIFICS here like cuda.h
- */
 #include <unistd.h>   // for many thing
 #include <stdlib.h>   // for standard library
 #include <stdio.h>    // for file dump
@@ -24,7 +20,7 @@
 #define PROBE_TYPE_WARP 1
 #define CDIV(a,b) (a + b - 1) / (b)
 
-static FILE* log; // file pointer to log:  NEUTRINO_TRACEDIR/MM_DD_HH_MM_SS/event.log
+static FILE* event_log; // file pointer to event_log:  NEUTRINO_TRACEDIR/MM_DD_HH_MM_SS/event.log
 
 /**
  * System Configuration and Setup
@@ -54,10 +50,10 @@ static size_t NEUTRINO_BENCHMARK_FLUSH_MEM_SIZE = 256e6;
 // simple auto-increasing idx to distinguish kernels of the same name
 static int kernel_idx = 0;
 
-// start time for logging. Neutrino trace are named as time since start
+// start time for event_logging. Neutrino trace are named as time since start
 static struct timespec start;
 
-// verbose setting -> to prevent log file too large due to unimportant setting
+// verbose setting -> to prevent event_log file too large due to unimportant setting
 static int VERBOSE = 0; 
 
 // helper macro to check dlopen/dlsym error
@@ -74,7 +70,7 @@ static int VERBOSE = 0;
 #define TIME_FORMAT_LEN 16
 static const char *months[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-// get the formatted current time (need char [TIME_FORMAT_LEN])
+// get the formatted current time (need char [15])
 void get_formatted_time(char* holder) {
     time_t rawtime;
     struct tm *timeinfo;
@@ -90,7 +86,7 @@ void get_formatted_time(char* holder) {
 
 
 /**
- * initialize log, dir, envvar, these kind of platform-diagnostic commons
+ * initialize event_log, dir, envvar, these kind of platform-diagnostic commons
  * need to be called at the beginning of platform-specific init()
  */
 static void common_init(void) {
@@ -159,12 +155,12 @@ static void common_init(void) {
     fprintf(stderr, "[info] trace in %s \n", TRACE_DIR);
     char* LOG_PATH = malloc(strlen(TRACE_DIR) + 20);
     sprintf(LOG_PATH, "%s/event.log", TRACE_DIR);
-    log = fopen(LOG_PATH, "a");
-    if (log == NULL) {
+    event_log = fopen(LOG_PATH, "a");
+    if (event_log == NULL) {
         perror("Can open event.log");
         exit(EXIT_FAILURE);
     }
-    fprintf(log, "[pid] %d\n", getpid()); // print the process id
+    fprintf(event_log, "[pid] %d\n", getpid()); // print the process id
     // get command line arguments
     char cmdpath[128], cmdline[1024];
     sprintf(cmdpath, "/proc/%d/cmdline", getpid());
@@ -180,12 +176,12 @@ static void common_init(void) {
     }
     fclose(cmdfile);
     // print the command line, helpful to correlate source code
-    fprintf(log, "[cmd] %zu %s\n", len, cmdline); 
-    fflush(log);
+    fprintf(event_log, "[cmd] %zu %s\n", len, cmdline); 
+    fflush(event_log);
     // load real driver shared library
     shared_lib = dlopen(NEUTRINO_REAL_DRIVER, RTLD_LAZY);
     CHECK_DL();
-    fprintf(log, "[info] dl %p\n", shared_lib); 
+    fprintf(event_log, "[info] dl %p\n", shared_lib); 
     // get the starting time
     clock_gettime(CLOCK_REALTIME, &start);
     free(LOG_PATH);
