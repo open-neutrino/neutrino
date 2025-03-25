@@ -12,6 +12,13 @@ For observability, Neutrino mainly features:
 > 🥳AMD ROCm/HIP Support is now Alpha🥳 You can try with `neutrino -t block_sched_amd ...` to experiment this new exciting feature! 
 > We also modify the core infra to make it more platform-agnostic, and understoodable!
 
+## Support Status for ROCm/HIP
+1. Hook Driver support parse and generate symbols from `hip/hip_runtime_api.h` and `libamdhip.so`.
+2. Probe Engine support parse AMD GCNAsm, Allocate additional register space and insert probes accoriding to syntax
+
+### Known Issues
+1. Current Hook Driver lacks , making `rocblas` not functionaling correctly.
+
 ## Installtion
 As the project is still in preview, please install from source via:
 
