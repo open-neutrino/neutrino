@@ -1,79 +1,102 @@
 /**
- * Neutrino Hook CUDA Driver
+ * Neutrino Hook Driver, NVIDIA CUDA Implementation
 */
 
-#include <unistd.h> // for many thing
-#include <stdlib.h> // for standard library
-#include <stdio.h>  // for file dump
-#include <dlfcn.h>  // for loading real cuda shared library
-#include <sys/stat.h> // for directory
-#include <sys/wait.h> // for waiting subprocess
-#include <time.h>   // for timing related
-
 #include "common.h" // for common headers
-
-static void* shared_lib           = NULL; // handle to real cuda driver
-static char* NEUTRINO_REAL_CUDA   = NULL; // path to real cuda driver, loaded by env_var NEUTRINO_REAL_CUDA
-static char* NEUTRINO_PYTHON      = NULL; // path to python exe, loaded by env_var NEUTRINO_PYTHON
-static char* NEUTRINO_PROCESS_PY  = NULL; // path to process.py, loaded by env_var NEUTRINO_PROCESS_PY
-
-// directory structure 
-static char* RESULT_DIR = NULL; // env_var NEUTRINO_TRACEDIR/MM_DD_HH_MM_SS/result
-static char* KERNEL_DIR = NULL; // env_var NEUTRINO_TRACEDIR/MM_DD_HH_MM_SS/kernel
-
-// a filter to temporarily disable the tracing, motivated for disable trace in `torch.compile`, loaded by env_var `NEUTRINO_ENABLE`
-static int NEUTRINO_ENABLE = 1;
+#include <cuda.h>   // for cuda related
 
 /**
- * Benchmark mode, will include an additional launch after the trace kernel
- * Used to measure the kernel-level slowdown of Neutrino, disabled by default
- * @warning might cause CUDA_ERROR with in-place kernels, coupled with --filter if encountered
- *          this intrinsic of program and can not be resolved by Neutrino
- * @note benchmark_mem is a 256MB empty memory that will be cuMemSetD32 to 0
- *       which take the L2 Cache Space and Remove Previous L2 Cache Value, 
- * @cite this is inspired by Triton do_bench and Nvidia https://github.com/NVIDIA/nvbench/
+ * Undefine some symbols updated to v2. These are some historical issue with
+ * 32bit machine. Now with 64bit machine, NVIDIA update them to v2.
  */
-static int NEUTRINO_BENCHMARK = 0;
-static int NEUTRINO_BENCHMARK_FLUSH_MEM_SIZE = 256e6; 
+#undef cuMemAlloc
+#undef cuStreamGetCaptureInfo
+#undef cuArray3DCreate
+#undef cuArray3DGetDescriptor
+#undef cuArrayCreate
+#undef cuArrayGetDescriptor
+#undef cuCtxCreate
+#undef cuCtxDestroy
+#undef cuCtxPopCurrent
+#undef cuCtxPushCurrent
+#undef cuDevicePrimaryCtxRelease
+#undef cuDevicePrimaryCtxReset
+#undef cuDevicePrimaryCtxSetFlags
+#undef cuDeviceTotalMem
+#undef cuEventDestroy
+#undef cuGetProcAddress
+#undef cuGraphAddKernelNode
+#undef cuGraphExecKernelNodeSetParams
+#undef cuGraphExecUpdate
+#undef cuGraphicsResourceGetMappedPointer
+#undef cuGraphicsResourceSetMapFlags
+#undef cuGraphKernelNodeGetParams
+#undef cuGraphKernelNodeSetParams
+#undef cuIpcOpenMemHandle
+#undef cuLinkAddData
+#undef cuLinkAddFile
+#undef cuLinkCreate
+#undef cuMemAllocHost
+#undef cuMemAllocPitch
+#undef cuMemcpy2DAsync
+#undef cuMemcpy2DUnaligned
+#undef cuMemcpy2D
+#undef cuMemcpy3DAsync
+#undef cuMemcpy3D
+#undef cuMemcpyAtoA
+#undef cuMemcpyAtoD
+#undef cuMemcpyAtoHAsync
+#undef cuMemcpyAtoH
+#undef cuMemcpyDtoA
+#undef cuMemcpyDtoDAsync
+#undef cuMemcpyDtoD
+#undef cuMemcpyDtoHAsync
+#undef cuMemcpyDtoH
+#undef cuMemcpyHtoAAsync
+#undef cuMemcpyHtoA
+#undef cuMemcpyHtoDAsync
+#undef cuMemcpyHtoD
+#undef cuMemFree
+#undef cuMemGetAddressRange
+#undef cuMemGetInfo
+#undef cuMemHostGetDevicePointer
+#undef cuMemHostRegister
+#undef cuMemsetD16
+#undef cuMemsetD2D16
+#undef cuMemsetD2D32
+#undef cuMemsetD2D8
+#undef cuMemsetD32
+#undef cuMemsetD8
+#undef cuModuleGetGlobal
+#undef cuStreamBatchMemOp
+#undef cuStreamBeginCapture
+#undef cuStreamDestroy
+#undef cuStreamWaitValue32
+#undef cuStreamWaitValue64
+#undef cuStreamWriteValue32
+#undef cuStreamWriteValue64
+#undef cuTexRefGetAddress
+#undef cuTexRefSetAddress2D
+#undef cuTexRefSetAddress
+
+#define WARP_SIZE 32 
+// used by benchmark mode
 static CUdeviceptr benchmark_flush_mem = 0u; // aka NULL
 
-// simple auto-increasing idx to distinguish kernels of the same name (Triton Autotune)
-static int kernel_idx = 0;
-
-// start time for logging, this works as rough sense of Neutrino slowdown across kernels
-// and provides basic ordering of trace for later processing
-static struct timespec start;
-
-// verbose setting -> to prevent log file too large due to unimportant setting
-static int VERBOSE = 0; 
-
-// following three function are hooked for Neutrino
-// and Neutrino save it here to load in init()
+// following functions are hooked for internal usage
 CUresult (*real_cuModuleLoadData)(CUmodule*, const void*) = NULL;
+CUresult (*real_cuModuleLoadDataEx)(CUmodule*, const void*, unsigned int, CUjit_option*, void**) = NULL;
 CUresult (*real_cuModuleGetFunction)(CUfunction*, CUmodule, const char*) = NULL;
+CUresult (*real_cuKernelGetFunction)(CUfunction*, CUkernel) = NULL;
+CUresult (*real_cuLibraryGetKernel)(CUkernel*, CUlibrary, const char*) = NULL;
+CUresult (*real_cuLibraryGetModule)(CUmodule*, CUlibrary) = NULL;
+CUresult (*real_cuLibraryLoadData)(CUlibrary*, const void*, CUjit_option*, void**, unsigned int, CUlibraryOption*, void**, unsigned int) = NULL;
 CUresult (*real_cuLaunchKernel)(CUfunction, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, CUstream, void**, void**) = NULL;
 CUresult (*real_cuMemAlloc_v2)(CUdeviceptr*, size_t) = NULL;
-CUresult (*real_cuMemAllocHost_v2)(void**, size_t) = NULL;
 CUresult (*real_cuMemFree_v2)(CUdeviceptr) = NULL;
-CUresult (*real_cuMemcpyDtoH_v2)(void*, CUdeviceptr, size_t) = NULL;
-CUresult (*real_cuMemcpyHtoD_v2)(CUdeviceptr, const void*, size_t) = NULL;
-CUresult (*real_cuMemsetD32_v2)(CUdeviceptr, unsigned int, size_t) = NULL;
-CUresult (*real_cuGetProcAddress_v2)(const char*, void**, int, cuuint64_t, CUdriverProcAddressQueryResult*) = NULL;
-CUresult (*real_cuDeviceGetAttribute)(int*, CUdevice_attribute, CUdevice) = NULL;
-CUresult (*real_cuGetErrorName)(CUresult error, const char** pStr) = NULL;
-CUresult (*real_cuModuleLoad)(CUmodule* module, const char* fname) = NULL;
-CUresult (*real_cuModuleLoadFatBinary)(CUmodule* module, const void* fatCubin) = NULL;
-CUresult (*real_cuLaunchKernelEx)(const CUlaunchConfig* config, CUfunction f, void** kernelParams, void** extra) = NULL;
-CUresult (*real_cuStreamSynchronize)(CUstream hStream) = NULL;
-
-// helper macro to check dlopen/dlsym error
-#define CHECK_DL() do {                    \
-    const char *dl_error = dlerror();      \
-    if (dl_error) {                        \
-        fprintf(stderr, "%s\n", dl_error); \
-        exit(EXIT_FAILURE);                \
-    }                                      \
-} while (0)
+CUresult (*real_cuModuleLoad)(CUmodule*, const char*) = NULL;
+CUresult (*real_cuModuleLoadFatBinary)(CUmodule*, const void*) = NULL;
+CUresult (*real_cuLaunchKernelEx)(const CUlaunchConfig*, CUfunction, void**, void**) = NULL;
 
 // helper macro to check cuda error
 #define CUDA_CHECK(cmd) do {                    \
@@ -101,127 +124,28 @@ CUresult (*real_cuStreamSynchronize)(CUstream hStream) = NULL;
  * @note this will be called only once when any hooked driver function is called
  */
 static void init(void) {
-    // get environment variables
-    NEUTRINO_REAL_CUDA = getenv("NEUTRINO_REAL_CUDA");
-    if (NEUTRINO_REAL_CUDA == NULL) {
-        fprintf(stderr, "Environmental Variable NEUTRINO_REAL_CUDA not set\n");
-        exit(EXIT_FAILURE);
-    }
-    NEUTRINO_PYTHON = getenv("NEUTRINO_PYTHON");
-    if (NEUTRINO_PYTHON == NULL) {
-        fprintf(stderr, "Environmental Variable NEUTRINO_PYTHON not set\n");
-        exit(EXIT_FAILURE);
-    }
-    NEUTRINO_PROCESS_PY = getenv("NEUTRINO_PROCESS_PY");
-    if (NEUTRINO_PROCESS_PY == NULL) {
-        fprintf(stderr, "Environmental Variable NEUTRINO_PROCESS_PY not set\n");
-        exit(EXIT_FAILURE);
-    }
-    char* verbose = getenv("NEUTRINO_VERBOSE");
-    if (verbose != NULL && atoi(verbose) != 0) {
-        VERBOSE = 1;
-    } // otherwise, default is 0
-    char* benchmark = getenv("NEUTRINO_BENCHMARK");
-    if (benchmark != NULL && atoi(benchmark) != 0) {
-        NEUTRINO_BENCHMARK = 1;
-    }
-    char* NEUTRINO_TRACEDIR = getenv("NEUTRINO_TRACEDIR");
-    if (NEUTRINO_TRACEDIR == NULL) {
-        fprintf(stderr, "Environment Variable NEUTRINO_TRACEDIR not set\n");
-        exit(EXIT_FAILURE);
-    }
-    // check and create folder structure
-    // first create GPUMEM_TRACE_DIR
-    if (access(NEUTRINO_TRACEDIR, F_OK) != 0) { // not existed or bugs
-        if (mkdir(NEUTRINO_TRACEDIR, 0755) != 0) {
-            perror("Can not create NEUTRINO_TRACEDIR");
-            exit(EXIT_FAILURE);
-        }
-    }
-    // generate TRACE_DIR and create if need
-    char* TRACE_DIR = (char*) malloc(strlen(NEUTRINO_TRACEDIR) + 30);
-    // get the current time to do
-    char current_time[TIME_FORMAT_LEN];
-    get_formatted_time(current_time);
-    // format is time_pid -> pid to avoid multiprocess in one second (fix for PyTorch & NCCL)
-    sprintf(TRACE_DIR, "%s/%s_%d", NEUTRINO_TRACEDIR, current_time, getpid());
-    if (mkdir(TRACE_DIR, 0755) != 0) {
-        perror("Can not create TRACE_DIR");
-        exit(EXIT_FAILURE);
-    }
-    // create the directories and files
-    RESULT_DIR = malloc(strlen(TRACE_DIR) + 8);
-    sprintf(RESULT_DIR, "%s/result", TRACE_DIR);
-    if (mkdir(RESULT_DIR, 0755) != 0) {
-        perror("Can not create RESULT_DIR");
-        exit(EXIT_FAILURE);
-    }
-    KERNEL_DIR = malloc(strlen(TRACE_DIR) + 8);
-    sprintf(KERNEL_DIR, "%s/kernel", TRACE_DIR);
-    if (mkdir(KERNEL_DIR, 0755) != 0) {
-        perror("Can not create KERNEL_DIR");
-        exit(EXIT_FAILURE);
-    }
-    fprintf(stderr, "[info] trace in %s \n", TRACE_DIR);
-    char* LOG_PATH = malloc(strlen(TRACE_DIR) + 20);
-    sprintf(LOG_PATH, "%s/event.log", TRACE_DIR);
-    log = fopen(LOG_PATH, "a");
-    if (log == NULL) {
-        perror("Can open event.log");
-        exit(EXIT_FAILURE);
-    }
-    fprintf(log, "[pid] %d\n", getpid()); // print the process id
-    // get command line arguments
-    char cmdpath[128], cmdline[1024];
-    sprintf(cmdpath, "/proc/%d/cmdline", getpid());
-    FILE *cmdfile = fopen(cmdpath, "r");
-    size_t len = fread(cmdline, 1, sizeof(cmdline) - 1, cmdfile);
-    if (len > 0) {
-        // Replace null characters with spaces
-        for (int i = 0; i < len; i++) {
-            if (cmdline[i] == '\0') { 
-                cmdline[i] = ' ';
-            }
-        }
-    }
-    fclose(cmdfile);
-    // print the command line, helpful to correlate source code
-    fprintf(log, "[cmd] %zu %s\n", len, cmdline); 
-    fflush(log);
-    // load real CUDA shared library
-    shared_lib = dlopen(NEUTRINO_REAL_CUDA, RTLD_LAZY);
-    if (!shared_lib) {
-        fprintf(stderr, "%s\n", dlerror());
-        exit(EXIT_FAILURE);
-    }
-    fprintf(log, "[info] dl %p\n", shared_lib); 
-    // load directly used function of Neutrino
+    common_init(); // init common modules
+    // load hooked function of Neutrino
     real_cuModuleLoadData     = dlsym(shared_lib, "cuModuleLoadData");
+    real_cuModuleLoadDataEx   = dlsym(shared_lib, "cuModuleLoadDataEx");
     real_cuModuleGetFunction  = dlsym(shared_lib, "cuModuleGetFunction");
+    real_cuKernelGetFunction  = dlsym(shared_lib, "cuKernelGetFunction");
+    real_cuLibraryGetKernel   = dlsym(shared_lib, "cuLibraryGetKernel");
+    real_cuLibraryGetModule   = dlsym(shared_lib, "cuLibraryGetModule");
+    real_cuLibraryLoadData    = dlsym(shared_lib, "cuLibraryLoadData");
     real_cuLaunchKernel       = dlsym(shared_lib, "cuLaunchKernel");
     real_cuMemAlloc_v2        = dlsym(shared_lib, "cuMemAlloc_v2");
-    real_cuMemAllocHost_v2    = dlsym(shared_lib, "cuMemAllocHost_v2");
     real_cuMemFree_v2         = dlsym(shared_lib, "cuMemFree_v2");
-    real_cuMemcpyDtoH_v2      = dlsym(shared_lib, "cuMemcpyDtoH_v2");
-    real_cuMemcpyHtoD_v2      = dlsym(shared_lib, "cuMemcpyHtoD_v2");
-    real_cuMemsetD32_v2       = dlsym(shared_lib, "cuMemsetD32_v2");
-    real_cuGetProcAddress_v2  = dlsym(shared_lib, "cuGetProcAddress_v2");
-    real_cuDeviceGetAttribute = dlsym(shared_lib, "cuDeviceGetAttribute");
-    real_cuGetErrorName       = dlsym(shared_lib, "cuGetErrorName");
     real_cuModuleLoad         = dlsym(shared_lib, "cuModuleLoad");
     real_cuModuleLoadFatBinary = dlsym(shared_lib, "cuModuleLoadFatBinary");
     real_cuLaunchKernelEx     = dlsym(shared_lib, "cuLaunchKernelEx");
-    real_cuStreamSynchronize  = dlsym(shared_lib, "cuStreamSynchronize");
-    init_unmodified(); // init unmodified functions 
+    init_unmodified(); // init unmodified functions, defined in signature.c
     CHECK_DL(); // checking if any dl error presented
     // initialzie the L2 Flush Memory if benchmark is enabled
     if (NEUTRINO_BENCHMARK) {
-        fprintf(log, "[benchmark] ENABLED L2 Flush Size %d\n", NEUTRINO_BENCHMARK_FLUSH_MEM_SIZE);
+        fprintf(log, "[benchmark] ENABLED L2 Flush Size %ld\n", NEUTRINO_BENCHMARK_FLUSH_MEM_SIZE);
         real_cuMemAlloc_v2(&benchmark_flush_mem, NEUTRINO_BENCHMARK_FLUSH_MEM_SIZE);
     }
-    clock_gettime(CLOCK_REALTIME, &start);
-    free(LOG_PATH);
-    free(TRACE_DIR);
     fprintf(log, "[info] init success\n"); 
 }
 
@@ -229,7 +153,7 @@ static void init(void) {
  * Module Management: cuModuleXXX
  * @see https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__MODULE.html
  * 
- * aims at saving the code of CUfunction to file system
+ * This is to track the lowering pass from code (binary on disk) to CUfunction
  */
 
 CUresult cuModuleLoadData(CUmodule* module, const void* image) {
@@ -256,7 +180,7 @@ CUresult cuModuleLoadData(CUmodule* module, const void* image) {
         memcpy(&header, image, sizeof(header));
         size = get_fatbin_size(&header);
         code = (const void*) image;
-    } else if (code_type == CUBIN) {
+    } else if (code_type == ELF) {
         Elf64_Ehdr header;
         memcpy(&header, image, sizeof(header));
         size = get_elf_size(&header);
@@ -277,7 +201,7 @@ CUresult cuModuleLoadData(CUmodule* module, const void* image) {
     managed_bin = malloc(size);
     memcpy(managed_bin, code, size);
 
-    // call the real function
+    // call the real function, after this, module will be valid
     CUresult result = real_cuModuleLoadData(module, image);
 
     fprintf(log, "[mod] cuModuleLoadData %d module %p image %p type %s, size %zu\n", result, *module, image, code_types[code_type], size);
@@ -312,7 +236,7 @@ CUresult cuModuleLoadDataEx(CUmodule* module, const void* image, unsigned int nu
         memcpy(&header, image, sizeof(header));
         size = get_fatbin_size(&header);
         code = (const void*) image;
-    } else if (code_type == CUBIN) {
+    } else if (code_type == ELF) {
         Elf64_Ehdr header;
         memcpy(&header, image, sizeof(header));
         size = get_elf_size(&header);
@@ -333,9 +257,7 @@ CUresult cuModuleLoadDataEx(CUmodule* module, const void* image, unsigned int nu
     managed_bin = malloc(size);
     memcpy(managed_bin, code, size);
     
-    CUresult (*real)(CUmodule*, const void*, unsigned int, CUjit_option*, void**) = dlsym(shared_lib, "cuModuleLoadDataEx");
-    CHECK_DL(); // checking if any dl error presented
-    CUresult ret = real(module, image, numOptions, options, optionValues);
+    CUresult ret = real_cuModuleLoadDataEx(module, image, numOptions, options, optionValues);
     
     fprintf(log, "[mod] cuModuleLoadDataEx mod %p code %p type %s size %zu\n", *module, image, code_types[code_type], size);
 
@@ -369,12 +291,10 @@ CUresult cuModuleGetFunction(CUfunction* hfunc, CUmodule hmod, const char* name)
 }
 
 CUresult cuKernelGetFunction(CUfunction* pFunc, CUkernel kernel) {
-    if (shared_lib == NULL)
+    if (shared_lib == NULL) 
         init();
 
-    CUresult (*real)(CUfunction*, CUkernel) = dlsym(shared_lib, "cuKernelGetFunction");
-    CHECK_DL(); // checking if any dl error presented
-    CUresult result = real(pFunc, kernel);
+    CUresult result = real_cuKernelGetFunction(pFunc, kernel);
 
     fprintf(log, "[mod] cuKernelGetFunction %p %p\n", *pFunc, kernel);
 
@@ -395,9 +315,7 @@ CUresult cuLibraryGetKernel(CUkernel* pKernel, CUlibrary library, const char* na
     char* managed_name = malloc(len);
     memcpy(managed_name, name, len);
 
-    CUresult (*real)(CUkernel*, CUlibrary, const char*) = dlsym(shared_lib, "cuLibraryGetKernel");
-    CHECK_DL(); // checking if any dl error presented
-    CUresult result = real(pKernel, library, name);
+    CUresult result = real_cuLibraryGetKernel(pKernel, library, name);
 
     fprintf(log, "[mod] cuLibraryGetKernel kernel %p lib %p name %s\n", *pKernel, library, name);
 
@@ -414,9 +332,7 @@ CUresult cuLibraryGetModule(CUmodule* pMod, CUlibrary library) {
     if (shared_lib == NULL)
         init();
 
-    CUresult (*real)(CUmodule*, CUlibrary) = dlsym(shared_lib, "cuLibraryGetModule");
-    CHECK_DL(); // checking if any dl error presented
-    CUresult result = real(pMod, library);
+    CUresult result = real_cuLibraryGetModule(pMod, library);
 
     fprintf(log, "[mod] cuLibraryGetModule %d mod %p lib %p\n", result, *pMod, library);
 
@@ -452,7 +368,7 @@ CUresult cuLibraryLoadData(CUlibrary* library, const void* code, CUjit_option* j
         memcpy(&header, code, sizeof(header));
         size = get_fatbin_size(&header);
         bin = (const void*) code;
-    } else if (bin_type == CUBIN) {
+    } else if (bin_type == ELF) {
         Elf64_Ehdr header;
         memcpy(&header, code, sizeof(header));
         size = get_elf_size(&header);
@@ -474,9 +390,7 @@ CUresult cuLibraryLoadData(CUlibrary* library, const void* code, CUjit_option* j
     managed_bin = malloc(size);
     memcpy(managed_bin, bin, size);
 
-    CUresult (*real)(CUlibrary*, const void*, CUjit_option*, void**, unsigned int, CUlibraryOption*, void**, unsigned int) = dlsym(shared_lib, "cuLibraryLoadData");
-    CHECK_DL(); // checking if any dl error presented
-    CUresult result = real(library, code, jitOptions, jitOptionsValues, numJitOptions, libraryOptions, libraryOptionValues, numLibraryOptions);
+    CUresult result = real_cuLibraryLoadData(library, code, jitOptions, jitOptionsValues, numJitOptions, libraryOptions, libraryOptionValues, numLibraryOptions);
     fprintf(log, "[mod] cuLibraryLoadData %d lib %p code %p type %s size %zu\n", result, *library, code, code_types[bin_type], size);
 
     // update to hashmap
@@ -493,28 +407,28 @@ CUresult cuLibraryLoadData(CUlibrary* library, const void* code, CUjit_option* j
  */
 
 CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDimY, unsigned int gridDimZ, unsigned int blockDimX, unsigned int blockDimY, unsigned int blockDimZ, unsigned int sharedMemBytes, CUstream hStream, void** kernelParams, void** extra) {
-    if (real_cuLaunchKernel == NULL)
+    if (shared_lib == NULL)
         init();
-
+    
     CUevent start_event, end_event;
     CUDA_CHECK(real_cuEventCreate(&start_event, CU_EVENT_DEFAULT));
     CUDA_CHECK(real_cuEventCreate(&end_event,   CU_EVENT_DEFAULT));
     
     CUDA_CHECK(real_cuEventRecord(start_event, hStream)); // use the stream specified in param
 
-    float prologue_time, kernel_time, epilogue_time;
+    float prologue_time, kernel_time, epilogue_time; // time
     CUresult result;
     CUfunction probed, pruned;
     char* kernel_name;
     int n_param, n_probe; 
     int* probe_sizes; // size of probes
     int* probe_types; // type of probes
-    bool succeed; // jit status
-    char* analyze_hook; // 
+    bool succeed;         // jit status
+    char* analyze_hook;   // path to python script 
 
     // try obtain the kernel compiled or raise compilation process 
     // @note count and record is only valid if succeed == true
-    if (funcmap_get(f, &kernel_name, &n_param, &n_probe, &probe_sizes, &probe_types, &succeed, &probed, &pruned) == -1) {
+    if (funcmap_get((void*)f, &kernel_name, &n_param, &n_probe, &probe_sizes, &probe_types, &succeed, (void**)&probed, (void**)&pruned) == -1) {
         fprintf(log, "[exec] funcmap-not-find %p\n", f);
         fflush(log); // we need many fflush to avoid trace not printed
         // here try to get binary from binmap and start JIT compile
@@ -568,10 +482,10 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
                 goto backup;
             } else if (pid == 0) { // child process, run python process.py kernel name
                 // python process.py <work_dir> <kernel_name>
-                execlp(NEUTRINO_PYTHON, NEUTRINO_PYTHON, NEUTRINO_PROCESS_PY, dir, kernel_name, NULL);
+                execlp(NEUTRINO_PYTHON, NEUTRINO_PYTHON, NEUTRINO_PROBING_PY, dir, kernel_name, NULL);
                 exit(EXIT_FAILURE); // reach here only if exec error -> failure
             } else { // parent process, wait for child
-                fprintf(log, "[jit] subproc %s %s %s %s\n", NEUTRINO_PYTHON, NEUTRINO_PROCESS_PY, dir, kernel_name);
+                fprintf(log, "[jit] subproc %s %s %s %s\n", NEUTRINO_PYTHON, NEUTRINO_PROBING_PY, dir, kernel_name);
                 int status;
                 waitpid(pid, &status, 0);
                 if (status != EXIT_SUCCESS) { 
@@ -614,11 +528,10 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
             void* pruned_bin = readf(path, "rb");
             // then load the binary to module
             CUmodule probed_mod, pruned_mod;
+            // then get function with the SAME name -> we distinguish via Module
             CUDA_CHECK(real_cuModuleLoadData(&probed_mod,  probed_bin));
-            // then get function with the SAME name -> we distinguish via 
             CUDA_CHECK(real_cuModuleGetFunction(&probed, probed_mod, kernel_name));
             CUDA_CHECK(real_cuModuleLoadData(&pruned_mod,  pruned_bin));
-            // then get function with the SAME name -> we distinguish via 
             CUDA_CHECK(real_cuModuleGetFunction(&pruned, pruned_mod, kernel_name));
             // add record to hashmap to avoid re-compile 
             funcmap_set(f, kernel_name, n_param, n_probe, probe_sizes, probe_types, true, probed, pruned);
@@ -827,8 +740,8 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
     return CUDA_SUCCESS; // reach here must be CUDA_SUCCESS
 
 backup:
-    fprintf(log, "[exec] backup %u %u %u block %u %u %u shared %u\n", gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes);
     // fall back to original version
+    fprintf(log, "[exec] backup %u %u %u block %u %u %u shared %u\n", gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes);
     result = real_cuLaunchKernel(f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes, hStream, kernelParams, extra);
     return result;
 }
@@ -839,7 +752,7 @@ backup:
 
 // Memory API
 CUresult cuMemAlloc_v2(CUdeviceptr *dptr, size_t bytesize) {
-    if (real_cuMemAlloc_v2 == NULL)
+    if (shared_lib == NULL)
         init();
 
     CUresult result = real_cuMemAlloc_v2(dptr, bytesize);
@@ -849,19 +762,8 @@ CUresult cuMemAlloc_v2(CUdeviceptr *dptr, size_t bytesize) {
     return result;
 }
 
-CUresult cuMemAllocHost_v2(void** pp, size_t bytesize) {
-    if (real_cuMemAllocHost_v2 == NULL)
-        init();
-    
-    CUresult retval = real_cuMemAllocHost_v2(pp, bytesize); // call the symbol
-
-    fprintf(log, "[mem] cuMemAllocHost_v2 %d ptr %p bytesize %zu\n", retval, *pp, bytesize);
-    
-    return retval;
-}
-
 CUresult cuMemFree_v2(CUdeviceptr dptr) {
-    if (real_cuMemFree_v2 == NULL)
+    if (shared_lib == NULL)
         init();
 
     CUresult result = real_cuMemFree_v2(dptr);
@@ -871,113 +773,30 @@ CUresult cuMemFree_v2(CUdeviceptr dptr) {
     return result;
 }
 
-// an example of 
-CUresult cuMemcpy_v2(CUdeviceptr dst, CUdeviceptr src, size_t ByteCount) {
-    if (shared_lib == NULL)
-        init();
-
-    CUresult (*real)(CUdeviceptr, CUdeviceptr, size_t) = dlsym(shared_lib, "cuMemcpy_v2");
-    CHECK_DL();
-
-    CUresult result = real(dst, src, ByteCount);
-
-    fprintf(log, "[mem] cuMemcpy_v2 %d dst %llx src %llx ByteCount %zu\n", result, dst, src, ByteCount); // unexpected func call
-
-    return result;
-}
-
-CUresult cuMemcpyHtoD_v2(CUdeviceptr dstDevice, const void* srcHost, size_t ByteCount) {
-    if (real_cuMemcpyHtoD_v2 == NULL)
-        init();
-
-    CUresult result = real_cuMemcpyHtoD_v2(dstDevice, srcHost, ByteCount);
-
-    fprintf(log, "[mem] cuMemcpyHtoD_v2 %d dstDevice %llx srcHost %p ByteCount %zu\n", result, dstDevice, srcHost, ByteCount);
-
-    return result;
-}
-
-CUresult cuMemcpyDtoH_v2(void* dstHost, CUdeviceptr srcDevice, size_t ByteCount) {
-    if (real_cuMemcpyDtoH_v2 == NULL)
-        init();
-
-    CUresult result = real_cuMemcpyDtoH_v2(dstHost, srcDevice, ByteCount);
-    
-    fprintf(log, "[mem] cuMemcpyDtoH_v2 %d dstHost %p srcDevice %llx ByteCount %zu\n", result, dstHost, srcDevice, ByteCount);
-
-    return result;
-}
-
-CUresult cuMemsetD32_v2(CUdeviceptr dstDevice, unsigned int ui, size_t N) {
-    if (real_cuMemsetD32_v2 == NULL)
-        init();
-        
-    CUresult result = real_cuMemsetD32_v2(dstDevice, ui, N);
-
-    fprintf(log, "[mem] cuMemsetD32_v2 %d dstDevice %llx ui %u N %zu\n", result, dstDevice, ui, N);
-
-    return result;
-}
-
-CUresult cuDeviceGetAttribute(int* pi, CUdevice_attribute attrib, CUdevice dev) {
-    if (real_cuDeviceGetAttribute == NULL)
-        init();
-    
-    CUresult result = real_cuDeviceGetAttribute(pi, attrib, dev);
-    if (VERBOSE)
-        fprintf(log, "[info] cuDeviceGetAttribute %d attrib %d pi %d dev %d\n", result, attrib, *pi, dev); // unexpected func call
-    
-    return result;
-}
-
 /**
- * This API is INTENTIONALLY UNDOCUMENTED BY NVIDIA 
- * to facilitate their usage of dark apis such as cuBLAS
+ * Following functions shall also be hooked but we don't observe any workload
+ * calling them
  */
-CUresult cuGetExportTable(const void** ppExportTable, const CUuuid* pExportTableId) {
+CUresult cuModuleLoad(CUmodule* module, const char* fname) {
     if (shared_lib == NULL)
         init();
     
-    CUresult (*real)(const void**, const CUuuid*) = dlsym(shared_lib, "cuGetExportTable");
-    CHECK_DL(); 
+    CUresult result = real_cuModuleLoad(module, fname); // call the symbol
 
-    CUresult result = real(ppExportTable, pExportTableId);
-    fprintf(log, "[info] cuGetExportTable %d %p 0x%lx 0x%lx\n", result, *ppExportTable, (uint64_t)pExportTableId->bytes[0], (uint64_t)pExportTableId->bytes[8]); // unexpected func call
-
+    fprintf(log, "[info] cuModuleLoad %d\n", result);
+    
     return result;
-}
-
-CUresult cuModuleLoad(CUmodule* module, const char* fname) {
-    if (real_cuModuleLoad == NULL)
-        init();
-    
-    CUresult retval = real_cuModuleLoad(module, fname); // call the symbol
-
-    fprintf(log, "[info] cuModuleLoad %d\n", retval);
-    
-    return retval;
 }
 
 CUresult cuModuleLoadFatBinary(CUmodule* module, const void* fatCubin) {
-    if (real_cuModuleLoadFatBinary == NULL)
+    if (shared_lib == NULL)
         init();
     
-    CUresult retval = real_cuModuleLoadFatBinary(module, fatCubin); // call the symbol
+    CUresult result = real_cuModuleLoadFatBinary(module, fatCubin); // call the symbol
 
-    fprintf(log, "[info] cuModuleLoadFatBinary %d\n", retval);
+    fprintf(log, "[info] cuModuleLoadFatBinary %d\n", result);
     
-    return retval;
-}
-
-CUresult cuStreamSynchronize(CUstream hStream) {
-    if (real_cuStreamSynchronize == NULL)
-        init();
-    
-    CUresult retval = real_cuStreamSynchronize(hStream); // call the symbol
-
-    fprintf(log, "[info] cuStreamSynchronize %d\n", retval);
-    
-    return retval;
+    return result;
 }
 
 
@@ -1107,10 +926,10 @@ CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction f, void** ker
                 goto backup;
             } else if (pid == 0) { // child process, run python process.py kernel name
                 // python process.py <work_dir> <kernel_name>
-                execlp(NEUTRINO_PYTHON, NEUTRINO_PYTHON, NEUTRINO_PROCESS_PY, dir, kernel_name, NULL);
+                execlp(NEUTRINO_PYTHON, NEUTRINO_PYTHON, NEUTRINO_PROBING_PY, dir, kernel_name, NULL);
                 exit(EXIT_FAILURE); // reach here only if exec error -> failure
             } else { // parent process, wait for child
-                fprintf(log, "[jit] subproc %s %s %s %s\n", NEUTRINO_PYTHON, NEUTRINO_PROCESS_PY, dir, kernel_name);
+                fprintf(log, "[jit] subproc %s %s %s %s\n", NEUTRINO_PYTHON, NEUTRINO_PROBING_PY, dir, kernel_name);
                 int status;
                 waitpid(pid, &status, 0);
                 if (status != EXIT_SUCCESS) { 

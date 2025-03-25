@@ -5,7 +5,7 @@
  * 
  * @note Proprietary NVIDIA Softwares includes:
  * cublas/curand/cufft/cusparse/cusolver/optix/...
- * but at most case, only cuBLAS if you used PyTorch
+ * but at most case, only cuBLAS if you used PyTorch or other AIML workload
  */
  #define _GNU_SOURCE
  #include <dlfcn.h>     // for dynamic library
@@ -26,6 +26,10 @@
  // Pointer to GLIBC dlopen function, by dlsym(RTLD_NEXT, "dlopen")
  static void* (*real_dlopen)(const char *filename, int flags) = NULL;
  
+ static char* NEUTRINO_REAL_DRIVER = NULL;
+ static char* NEUTRINO_HOOK_DRIVER = NULL;
+ static char* NEUTRINO_DRIVER_NAME = NULL;
+ 
  /**
   * Provides a hook on both statically or dynamically loading shared library
   * by overwriting dlopen with the same signature as GLIBC dlopen
@@ -43,11 +47,15 @@
      // original (GLIBC) dlopen still exists in search space 
      // but is less prefered as LD_PRELOAD mask it
      // using dlsym with RTLD_NEXT we can extract GLIBC dlopen.
-     if (!real_dlopen) {
+     if (!real_dlopen) 
          real_dlopen = dlsym(RTLD_NEXT, "dlopen");
-     }
+     
+     if (!NEUTRINO_DRIVER_NAME) {
+         NEUTRINO_DRIVER_NAME = getenv("NEUTRINO_DRIVER_NAME");
+         fprintf(stderr, "[info] NEUTRINO_DRIVER_NAME: %s\n", NEUTRINO_DRIVER_NAME);
+     }   
  
-     if (filename != NULL && (strstr(filename, "libcuda.so.1") != NULL)) {
+     if (filename != NULL && (strstr(filename, NEUTRINO_DRIVER_NAME) != NULL)) {
          // Check if it's libcublas.so backtrace
          // @see https://man7.org/linux/man-pages/man3/backtrace.3.html
          void* array[STACK_TRACE_SIZE];
@@ -63,37 +71,39 @@
                  }
              }
          }
-         free (strings);
+         free(strings);
          void* ptr;
          if (call_from_cublas) {
-             char* REAL_CUDA_DRIVER = getenv("NEUTRINO_REAL_CUDA");
-             if (REAL_CUDA_DRIVER == NULL) {
-                 fprintf(stderr, "Environmental Variable NEUTRINO_REAL_CUDA not set\n");
-                 ptr = real_dlopen(filename, flags); // try to backup
+             if (NEUTRINO_REAL_DRIVER == NULL) {
+                 NEUTRINO_REAL_DRIVER = getenv("NEUTRINO_REAL_DRIVER");
+                 if (NEUTRINO_REAL_DRIVER == NULL) { // fault
+                     fprintf(stderr, "[error] NEUTRINO_REAL_DRIVER not set\n");
+                     exit(1);
+                 }
              }
-             ptr = real_dlopen(REAL_CUDA_DRIVER, flags);
+             ptr = real_dlopen(NEUTRINO_REAL_DRIVER, flags);
              struct timespec ts;
              clock_gettime(CLOCK_REALTIME, &ts);
              long long time = ts.tv_nsec + ts.tv_sec * 1e9;
-             printf("[info] %lld cublas use real: %s %p %d\n", time, REAL_CUDA_DRIVER, ptr, flags);
+             printf("[info] %lld cublas use real: %s %p %d\n", time, NEUTRINO_REAL_DRIVER, ptr, flags);
              fflush(stdout);
          } else {
-             char* HOOK_CUDA_DRIVER = getenv("NEUTRINO_HOOK_CUDA");
-             if (HOOK_CUDA_DRIVER == NULL) {
-                 fprintf(stderr, "Environmental Variable NEUTRINO_HOOK_CUDA not set\n");
+             char* NEUTRINO_HOOK_DRIVER = getenv("NEUTRINO_HOOK_DRIVER");
+             if (NEUTRINO_HOOK_DRIVER == NULL) {
+                 fprintf(stderr, "[error] NEUTRINO_HOOK_DRIVER not set\n");
                  ptr = real_dlopen(filename, flags); // try to backup
              }
-             ptr = real_dlopen(HOOK_CUDA_DRIVER, flags);
+             ptr = real_dlopen(NEUTRINO_HOOK_DRIVER, flags);
              if (DL_VERBOSE) {
                  struct timespec ts;
                  clock_gettime(CLOCK_REALTIME, &ts);
                  long long time = ts.tv_nsec + ts.tv_sec * 1e9;
-                 printf("[info] %lld use hook cudriver: %s %p %d\n", time, HOOK_CUDA_DRIVER, ptr, flags);
+                 printf("[info] %lld use hooked: %s %p %d\n", time, NEUTRINO_HOOK_DRIVER, ptr, flags);
                  fflush(stdout);
              }
          }
          return ptr;
-     } else { // not interested, just let them 
+     } else { // not interested, just let them go via loading the correct
          // Call the original dlopen
          void* ptr = real_dlopen(filename, flags);
          // Print the name of the module being loaded

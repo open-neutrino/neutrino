@@ -1,4 +1,4 @@
-""" Neutrino Probing Engine """
+"""Neutrino Probing Engine, CUDA Implementation"""
 
 from typing import List, Tuple, Optional, Dict, Set
 import os
@@ -8,6 +8,7 @@ import subprocess
 import traceback # usef for print backtrace to log file instead of stdout
 import toml      # to load probes from envariables
 from dataclasses import dataclass
+from engine import Probe, Ref, safe_load_probes, TRACE_READING_CODE_PY
 
 workdir = sys.argv[1]     # directory contains original.bin
 log = open(os.path.join(workdir, "process.log"), 'w')
@@ -19,26 +20,6 @@ SUPPORTED_DATAMODEL = { "thread": 0, "warp": 1 }
 class KernelParam:
     dtype: str
     name: str
-
-@dataclass
-class Probe:
-    """Neutrino Probes Data Structure"""
-    name: str                       # name is the key in TOML
-    position: List[str]             # := tracepoint in the paper
-    datamodel: Optional[str] = None # 
-    no_bytes:  Optional[str] = None # number of bytes per thread
-    before:    Optional[str] = None # snippet inserted before, one of before and after shall be given
-    after:     Optional[str] = None # snippet inserted after,  one of before and after shall be given
-    store_reg: Optional[str] = None # name of storage register
-    cap:       Optional[int] = -1   # only event-constant has the value
-    no_pred:   Optional[bool] = False # NOTE ignore the original predictive of instruction -> Not recommended
-
-@dataclass
-class Ref:
-    """Reference for replacement"""
-    line: str          # Original line
-    probe: str         # Probe name for matchine
-    before_after: bool # True if before and False if after -> to distinguish which snippet is used
 
 # TODO move it to global variable or configurable
 def get_arch() -> str:
@@ -62,7 +43,7 @@ def get_arch() -> str:
     major, minor = sm_version.split(".")
     return f"sm_{major}{minor}" 
 
-def extract(workdir: str, name: str = "original", suffix: str = ".bin") -> str:
+def dump(workdir: str, name: str = "original", suffix: str = ".bin") -> str:
     """Extract PTX from cuda binaries (cubin or fatbin) via cuobjdump
 
     NOTE accept three kind of binary:
@@ -287,40 +268,11 @@ WARP_PROBE_BUFFER = """// begin {name} buffer
 @%leader add.s64 %buf_{name}1, %buf_{name}2, %buf_{name}4;  // offset to get final thread-specific address
 // end {name} buffer"""
 
-# NOTE Template for Generating Trace Reading Code
-TRACE_READING_CODE_PY = """# Neutrino Auto-Generated Code for Trace Reading
-import struct
-from typing import NamedTuple, List, Tuple
-from neutrino import TraceHeader, TraceSection
-
-class {probe_name}(NamedTuple):
-{saved_content}
-
-def parse(path: str) -> Tuple[TraceHeader, List[TraceSection], List[List[{probe_name}]]]:
-    with open(path, "rb") as f:
-        gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes, numProbes = struct.unpack("iiiiiiii", f.read(32))
-        header: TraceHeader = TraceHeader(gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes, numProbes)
-        assert header.numProbes == 1 # currently only one saving probe is supported
-        sections: List[TraceSection] = []
-        for _ in range(header.numProbes):
-            size, offset = struct.unpack("QQ", f.read(16))
-            sections.append(TraceSection(size, offset))
-        gridSize = header.gridDimX * header.gridDimY * header.gridDimZ
-        blockSize = header.blockDimX * header.blockDimY * header.blockDimZ
-        records: List[List[{probe_name}]] = []
-        for i in range(gridSize):
-            records.append([])
-            for j in range(blockSize{warp_div}):
-                {saved_reading} = struct.unpack("{format_string}", f.read({reading_bytes}))
-                records[i].append({probe_name}({saved_reading}))
-        return header, sections, records
-"""
-
 # NOTE for every probe with datamodel not none
 # only support .u64 and recommend use 16 bytes alignment, minimum is 8 bytes
 PROBE_PARAM = ".param .u64 param_{name}"
 
-def probing(asm: str, probes: Dict[str, dict]) -> Tuple[str, List[int], str]:
+def probing(asm: str, probes: List[Probe]) -> Tuple[str, List[int], str]:
     """Process the probes, the core function of probing engine
 
     In general, Take several steps, from:
@@ -330,90 +282,6 @@ def probing(asm: str, probes: Dict[str, dict]) -> Tuple[str, List[int], str]:
     3. Parsing the PTX Assembly
     4. Adding the PTX Assembly
     """
-
-    def process_probe(raw_probes: Dict[str, dict]) -> List[Probe]:
-        """Turn Raw Probe (dict from toml) into dataclass, also apply restrictions
-
-        NOTE Position must be given, datamodel must be given if want to save, one of before and after must be given
-        """
-        probes: List[Probe] = []
-        for probe_name, raw_probe in raw_probes.items():
-            # first validate the 
-            keys = raw_probe.keys()
-            assert "position" in keys, f"[error] {probe_name} has no position (required)"
-            # assert "datamodel" in keys, f"[error] "
-            assert "before" in keys or "after" in keys, f"[error] {probe_name} is empty, one of before or start shall be given"
-            # gradually process all things
-            if "datamodel" in keys:
-                datamodel: str = raw_probe["datamodel"]
-                if datamodel.startswith("thread") or datamodel.startswith("warp"):
-                    tmp = datamodel.split(":")
-                    datamodel, no_bytes = tmp[0], tmp[1]
-                    cap = 1 if len(tmp) <= 2 else tmp[2] # by default save one item
-                else:
-                    raise ValueError(f"[error] unsupported datamodel {datamodel}")
-            else:
-                datamodel, no_bytes, cap = None, None, -1 # all marked with None
-            probe = Probe(name=probe_name, 
-                          position=raw_probe["position"].split(":") if ":" in raw_probe["position"] else [raw_probe["position"], ],
-                          datamodel=datamodel,
-                          no_bytes=no_bytes,
-                          before=raw_probe["before"] if "before" in keys else None,
-                          after=raw_probe["after"] if "after" in keys else None,
-                          no_pred=raw_probe["no_pred"] if "no_pred" in keys else False,
-                          cap = cap)
-            probes.append(probe)
-        return probes
-    
-    probes: List[Probe] = process_probe(raw_probes=probes)
-
-    def validate_probe(probes: List[Probe]) -> List[Probe]:
-        """Validate probes, including
-        1. Register Access, all registers shall be declared with .reg .type %regname;
-        2. Branch Operation -> Not supported
-        3. Using Shared Memory -> Not supported
-        """
-        safe_probes: List[Probe] = []
-        regs = []
-        for probe in probes:
-            rejected = False
-            if probe.before is not None: 
-                if "bra" in probe.before: 
-                    print("bra is not allowed", file=log)
-                    rejected = True
-                elif ".shared" in probe.before: 
-                    print("shared memory is not allowed", file=log)
-                    rejected = True # NO SHARED MEMORY
-                else:
-                    for line in probe.before.split("\n"):
-                        if ".reg" in line: 
-                            regs.append(line[:line.index(";")].split(" ")[-1])
-                        elif not line.startswith("SAVE"):
-                            out_op = line[:line.index(";")].split(",")[0].split(" ")[-1]
-                            if out_op not in regs: 
-                                print(f"Not allowed to modify undeclared {out_op}", file=log)
-                                rejected = True
-            if probe.after is not None: 
-                if "bra" in probe.after: 
-                    print("bra is not allowed", file=log)
-                    rejected = True
-                elif ".shared" in probe.after: 
-                    print("shared memory is not allowed", file=log)
-                    rejected = True # NO SHARED MEMORY
-                else:
-                    for line in probe.after.split("\n"):
-                        if ".reg" in line: 
-                            regs.append(line[:line.index(";")].split(" ")[-1])
-                        elif not line.startswith("SAVE"):
-                            out_op = line[:line.index(";")].split(",")[0].split(" ")[-1]
-                            if out_op not in regs: 
-                                print(f"Not allowed to modify undeclared {out_op}", file=log)
-                                rejected = True
-            if not rejected:
-                safe_probes.append(probe)
-        return safe_probes
-    
-    probes: List[Probe] = validate_probe(probes)
 
     # NOTE parse interesting locations
     # A mapping from location to probes, a probe can hook at multiple location
@@ -674,7 +542,7 @@ def probing(asm: str, probes: Dict[str, dict]) -> Tuple[str, List[int], str]:
     # Finally finished.1
     return "\n".join(ptx_lines), probe_mem_sizes, trace_reading_code
 
-def compile_ptx_to_bin(workdir: str, name: str) -> str:
+def assemble(workdir: str, name: str) -> None:
     """compile the ptx into cubin via ptxas
     NOTE: ptxas command like `ptxas -arch=sm_80 --verbose -m64  "original.ptx"  -o "original.cubin"` 
     * This is not actually need for running because CUDA Driver cuModuleLoad can load PTX (JIT),
@@ -775,7 +643,7 @@ if __name__ == "__main__":
 
     try:
         # first decompile binary to ptx
-        ptx = extract(workdir)
+        ptx = dump(workdir)
         # then truncate ptx for entry_name
         global_section, func_section, entry_section, _ = prune(ptx, kernel_name)
         # split and process ptx lines and write kernel info
@@ -793,6 +661,9 @@ if __name__ == "__main__":
         with open(os.path.join(workdir, "pruned.ptx"), "w") as f:
             f.write(pruned_ptx)
 
+        # convert probes from Python Dict to data structure
+        probes = safe_load_probes(raw_probes=probes)
+
         # process ptx lines
         probed_ptx, probe_mem_sizes, trace_reading_code = probing(entry_section, probes)
 
@@ -807,8 +678,8 @@ if __name__ == "__main__":
         write_kernel_info(kernel_name, params, probe_mem_sizes, workdir, analyze_hook)
 
         # compile ptx to binary, we want both probed and pruned
-        compile_ptx_to_bin(workdir, "probed")
-        compile_ptx_to_bin(workdir, "pruned")
+        assemble(workdir, "probed")
+        assemble(workdir, "pruned")
 
         print(trace_reading_code, file=log)
 

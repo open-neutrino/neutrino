@@ -1,0 +1,12 @@
+author="Neutrino Team"
+description="""Record start, end timestamp and smid of each thread on AMD
+AMD don't have u64 - u64??? Who design the ISA???"""
+
+[sched]
+position = "kernel"
+datamodel = "warp:16" # every warp save 16 bytes
+registers = { gstart = 'b64', gend = 'b64' }
+before = "S_MEMREALTIME gstart; get start timestamp"
+# following operationo is done only by leader thread
+after = """S_MEMREALTIME gend; get end timestamp
+SAVE.u64 {gstart, gend}; """
