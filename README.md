@@ -19,6 +19,7 @@ We plan to first support several widely-studied memory access pattern:
 Moreover, as we have multiple threads, we must have controls in:
 1. Launch waves: we carefully craft all kernels to have 1 launch waves, so the data size will varies for different GPUs, so there won't be imbalanced workload between SM Unit.
 2. GPU Threads: we controls the actual threads used to be exactly at the multiple of hardware limit, so there won't be imbalanced workload inside SM Units.
+
 Please note that these two are just for fast verification at early stage, we might adjust them if need for more comprehensive results.
 
 ## Acknowledgement
