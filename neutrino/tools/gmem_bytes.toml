@@ -19,7 +19,7 @@ position = "ld.global:st.global"
 # no datamodel
 before = """add.u32 %sync_bytes, %sync_bytes, BYTES;"""
 
-[tensor_op]
+[async]
 position = "cp.async.ca:cp.async.cg" # don't include commit_group and wait_group :(
 # no datamodel
 before = """add.u32 %async_bytes, %async_bytes, IN2;"""
