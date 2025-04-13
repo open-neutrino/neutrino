@@ -613,4 +613,55 @@
   */
  #include "unmodified.c" // include the auto-generated code
  
- 
+// Following are undocumented platform API for compatibility with CUDA Internal
+// but they're still in use, at least rocBLAS (dependent of PyToch) will use it
+
+typedef struct {
+    uint32_t x;
+    uint32_t y;
+    uint32_t z;
+} dim3;
+
+typedef struct {
+    uint32_t x;
+    uint32_t y;
+    uint32_t z;
+} uint3;
+
+// @see https://github.com/ROCm/hip/blob/rocm-4.2.x/rocclr/hip_platform.cpp#L76
+void** __hipRegisterFatBinary(const void* data) {
+    if (shared_lib == NULL)  { init(); }
+    void** (real___hipRegisterFatBinary*)(const void*) = dlsym(shared_lib, "__hipRegisterFatBinary");
+
+    void** fatbin = real___hipRegisterFatBinary(data);
+    if (VERBOSE)  { fprintf(event_log, "[info] __hipRegisterFatBinary %p %p\n", *fatbin, data); }
+    return fatbin;
+}
+
+// @see https://github.com/ROCm/hip/blob/rocm-4.2.x/rocclr/hip_platform.cpp#L87
+void __hipRegisterFunction(
+    void** modules,
+    const void*  hostFunction,
+    char*        deviceFunction,
+    const char*  deviceName,
+    unsigned int threadLimit,
+    uint3*       tid, // There's no official C style Impl of uint3 and dim3, I refer to
+    uint3*       bid, // https://rocm.docs.amd.com/projects/HIP/en/docs-5.7.0/reference/kernel_language.html#short-vector-types
+    dim3*        blockDim, // so as the dim3
+    dim3*        gridDim,  // https://rocm.docs.amd.com/projects/HIP/en/docs-5.7.0/reference/kernel_language.html#dim3
+    int*         wSize) {
+    if (shared_lib == NULL)  { init(); }
+    void (real___hipRegisterFunction*)(void**, const void*, char*, const char*, unsigned int, uint3*, uint3*, dim3*, dim3*, int*) = dlsym(shared_lib, "__hipRegisterFunction");
+
+    real___hipRegisterFunction(modules, hostFunction, deviceFunction, deviceName, threadLimit, tid, bid, blockDim, gridDim, wSize);
+    if (VERBOSE)  { fprintf(event_log, "[info] __hipRegisterFunction %p %p\n", *modules, hostFunction); }
+}
+
+// @see https://github.com/ROCm/hip/blob/rocm-4.2.x/rocclr/hip_platform.cpp#L178
+void __hipUnregisterFatBinary(void** modules) {
+    if (shared_lib == NULL)  { init(); }
+    void (real___hipUnregisterFatBinary*)(void**) = dlsym(shared_lib, "__hipUnregisterFatBinary");
+
+    real___hipUnregisterFatBinary(modules);
+    if (VERBOSE)  { fprintf(event_log, "[info] __hipUnregisterFatBinary %p\n", *modules); }
+}
