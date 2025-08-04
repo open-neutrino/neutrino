@@ -78,6 +78,7 @@
 #undef cuTexRefGetAddress
 #undef cuTexRefSetAddress2D
 #undef cuTexRefSetAddress
+#undef cuGraphInstantiate
 
 #define WARP_SIZE 32 // NVIDIA GPUs use 32 for WARP_SIZE
 // used by benchmark mode
@@ -87,16 +88,19 @@ static CUdeviceptr benchmark_flush_mem = 0u; // aka NULL
 CUresult (*real_cuModuleLoadData)(CUmodule*, const void*) = NULL;
 CUresult (*real_cuModuleLoadDataEx)(CUmodule*, const void*, unsigned int, CUjit_option*, void**) = NULL;
 CUresult (*real_cuModuleGetFunction)(CUfunction*, CUmodule, const char*) = NULL;
-CUresult (*real_cuKernelGetFunction)(CUfunction*, CUkernel) = NULL;
-CUresult (*real_cuLibraryGetKernel)(CUkernel*, CUlibrary, const char*) = NULL;
-CUresult (*real_cuLibraryGetModule)(CUmodule*, CUlibrary) = NULL;
-CUresult (*real_cuLibraryLoadData)(CUlibrary*, const void*, CUjit_option*, void**, unsigned int, CUlibraryOption*, void**, unsigned int) = NULL;
 CUresult (*real_cuLaunchKernel)(CUfunction, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, CUstream, void**, void**) = NULL;
 CUresult (*real_cuMemAlloc_v2)(CUdeviceptr*, size_t) = NULL;
 CUresult (*real_cuMemFree_v2)(CUdeviceptr) = NULL;
 CUresult (*real_cuModuleLoad)(CUmodule*, const char*) = NULL;
 CUresult (*real_cuModuleLoadFatBinary)(CUmodule*, const void*) = NULL;
+// CUDA 12.0 New APIs
+#if CUDA_VERSION >= 12000
+CUresult (*real_cuKernelGetFunction)(CUfunction*, CUkernel) = NULL;
+CUresult (*real_cuLibraryGetKernel)(CUkernel*, CUlibrary, const char*) = NULL;
+CUresult (*real_cuLibraryGetModule)(CUmodule*, CUlibrary) = NULL;
+CUresult (*real_cuLibraryLoadData)(CUlibrary*, const void*, CUjit_option*, void**, unsigned int, CUlibraryOption*, void**, unsigned int) = NULL;
 CUresult (*real_cuLaunchKernelEx)(const CUlaunchConfig*, CUfunction, void**, void**) = NULL;
+#endif
 
 // helper macro to check cuda error
 #define CUDA_CHECK(cmd) do {                    \
@@ -136,16 +140,18 @@ static void init(void) {
     real_cuModuleLoadData      = dlsym(shared_lib, "cuModuleLoadData");
     real_cuModuleLoadDataEx    = dlsym(shared_lib, "cuModuleLoadDataEx");
     real_cuModuleGetFunction   = dlsym(shared_lib, "cuModuleGetFunction");
-    real_cuKernelGetFunction   = dlsym(shared_lib, "cuKernelGetFunction");
-    real_cuLibraryGetKernel    = dlsym(shared_lib, "cuLibraryGetKernel");
-    real_cuLibraryGetModule    = dlsym(shared_lib, "cuLibraryGetModule");
-    real_cuLibraryLoadData     = dlsym(shared_lib, "cuLibraryLoadData");
     real_cuLaunchKernel        = dlsym(shared_lib, "cuLaunchKernel");
     real_cuMemAlloc_v2         = dlsym(shared_lib, "cuMemAlloc_v2");
     real_cuMemFree_v2          = dlsym(shared_lib, "cuMemFree_v2");
     real_cuModuleLoad          = dlsym(shared_lib, "cuModuleLoad");
     real_cuModuleLoadFatBinary = dlsym(shared_lib, "cuModuleLoadFatBinary");
+#if CUDA_VERSION >= 12000
+    real_cuKernelGetFunction   = dlsym(shared_lib, "cuKernelGetFunction");
+    real_cuLibraryGetKernel    = dlsym(shared_lib, "cuLibraryGetKernel");
+    real_cuLibraryGetModule    = dlsym(shared_lib, "cuLibraryGetModule");
+    real_cuLibraryLoadData     = dlsym(shared_lib, "cuLibraryLoadData");
     real_cuLaunchKernelEx      = dlsym(shared_lib, "cuLaunchKernelEx");
+#endif
     init_unmodified(); // init unmodified functions, defined in signature.c
     CHECK_DL(); // checking if any dl error presented
     // initialzie the L2 Flush Memory if benchmark is enabled
@@ -181,22 +187,6 @@ CUresult cuModuleLoadData(CUmodule* module, const void* image) {
         binmap_set(*module, managed, size, NULL); // name = NULL as we don't know it now
     }
     
-    return result;
-}
-
-CUresult cuLibraryLoadData(CUlibrary* library, const void* code, CUjit_option* jitOptions, void** jitOptionsValues, unsigned int numJitOptions, CUlibraryOption* libraryOptions, void** libraryOptionValues, unsigned int numLibraryOptions) {
-    if (shared_lib == NULL) { init(); }
-
-    CUresult result = real_cuLibraryLoadData(library, code, jitOptions, jitOptionsValues, numJitOptions, libraryOptions, libraryOptionValues, numLibraryOptions);
-    fprintf(event_log, "[mod] cuLibraryLoadData %d lib %p code %p\n", result, *library, code);
-
-    // update to hashmap
-    void*  managed;
-    size_t size;
-    if (get_managed_code_size(&managed, &size, code) != -1) {
-        binmap_set(*library, managed, size, NULL); // name = NULL as we don't know it now
-    }
-
     return result;
 }
 
@@ -254,6 +244,24 @@ CUresult cuModuleGetFunction(CUfunction* hfunc, CUmodule hmod, const char* name)
     return result;
 }
 
+#if CUDA_VERSION >= 12000
+
+CUresult cuLibraryLoadData(CUlibrary* library, const void* code, CUjit_option* jitOptions, void** jitOptionsValues, unsigned int numJitOptions, CUlibraryOption* libraryOptions, void** libraryOptionValues, unsigned int numLibraryOptions) {
+    if (shared_lib == NULL) { init(); }
+
+    CUresult result = real_cuLibraryLoadData(library, code, jitOptions, jitOptionsValues, numJitOptions, libraryOptions, libraryOptionValues, numLibraryOptions);
+    fprintf(event_log, "[mod] cuLibraryLoadData %d lib %p code %p\n", result, *library, code);
+
+    // update to hashmap
+    void*  managed;
+    size_t size;
+    if (get_managed_code_size(&managed, &size, code) != -1) {
+        binmap_set(*library, managed, size, NULL); // name = NULL as we don't know it now
+    }
+
+    return result;
+}
+
 CUresult cuKernelGetFunction(CUfunction* pFunc, CUkernel kernel) {
     if (shared_lib == NULL) { init(); }
 
@@ -304,6 +312,8 @@ CUresult cuLibraryGetModule(CUmodule* pMod, CUlibrary library) {
     return result;
 }
 
+#endif
+
 /**
  * Execution Control, cuLaunchXXX and cuFuncXXX
  * @see https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__EXEC.html
@@ -328,7 +338,7 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
     int n_param, n_probe; 
     int* probe_sizes; // size of probes
     int* probe_types; // type of probes
-    bool succeed;         // jit status
+    bool succeed;     // jit status
     // @note for dynamic buffer, i.e., only when DYNAMIC=true
     CUfunction countd = NULL;
     int n_count = 0, count_size = 0; // count_size is used only when DYNAMIC == True
