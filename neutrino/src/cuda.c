@@ -728,6 +728,414 @@ backup:
     return result;
 }
 
+#if CUDA_VERSION >= 12000
+CUresult cuLaunchKernelEx ( const CUlaunchConfig* config, CUfunction f, void** kernelParams, void** extra ){
+    if (shared_lib == NULL) { init(); }
+    
+    // for time measurement to understand the overhead of Neutrino
+    CUevent start_event, end_event;
+    CUDA_CHECK(real_cuEventCreate(&start_event, CU_EVENT_DEFAULT));
+    CUDA_CHECK(real_cuEventCreate(&end_event,   CU_EVENT_DEFAULT));
+    
+    CUDA_CHECK(real_cuEventRecord(start_event, config->hStream)); // use the stream specified in param
+
+    float prologue_time, kernel_time, epilogue_time; // time
+    CUresult result;
+    CUfunction probed, pruned; // countd is only used when DYNAMIC == True
+    char* kernel_name;
+    int n_param, n_probe; 
+    int* probe_sizes; // size of probes
+    int* probe_types; // type of probes
+    bool succeed;     // jit status
+    // @note for dynamic buffer, i.e., only when DYNAMIC=true
+    CUfunction countd = NULL;
+    int n_count = 0, count_size = 0; // count_size is used only when DYNAMIC == True
+
+    // try obtain the kernel compiled or raise compilation process 
+    // @note count and record is only valid if succeed == true
+    if (funcmap_get((void*)f, &kernel_name, &n_param, &n_probe, &probe_sizes, &probe_types, &succeed, (void**)&probed, (void**)&pruned, (void**)&countd) == -1) {
+        fprintf(event_log, "[exec] funcmap-not-find %p\n", f);
+        fflush(event_log); 
+        // here try to get binary  from binmap and start JIT compile
+        size_t size;
+        void* bin;
+        if (binmap_get(f, &size, &kernel_name, &bin) == -1) { // not found the binary, fall back
+            fprintf(event_log, "[probe] can't-find %p\n", f);
+            funcmap_set(f,kernel_name, 0, 0, NULL, NULL, false, NULL, NULL, NULL); // set dummy with status FALSE
+            goto backup;
+        } else {
+            fprintf(event_log, "[probe] find %p name %s bin %p size %zu\n", f, kernel_name, bin, size);
+            fflush(event_log);
+            // create a directory under the kernel directory with kernel_name
+            // @note Linux has limit on directory length 255, replace it to sh1 so 20 char
+            // @bugfix PyTorch kernel name usually is extremely long :(
+            // @bugfix Triton autotune leads to a set of kernel with same name -> use counter to differentiate
+            char *tmp = sha1(kernel_name);
+            char *folder_name = (char*) malloc(5 + strlen(tmp));
+            sprintf(folder_name, "%d_%s", kernel_idx, tmp);
+            free(tmp);
+            kernel_idx++;
+            fprintf(event_log, "[probe] rename %s %s\n", kernel_name, folder_name);
+            char* dir = malloc(strlen(KERNEL_DIR) + strlen(folder_name) + 10);
+            sprintf(dir, "%s/%s", KERNEL_DIR, folder_name);
+            if (mkdir(dir, 0755) == 0) { 
+                fprintf(event_log, "[probe] mkdir %s\n", dir);
+            } else {
+                fprintf(event_log, "[probe] can't-mkdir %s\n", dir);
+                funcmap_set(f,kernel_name, 0, 0, NULL, NULL, false, NULL, NULL, NULL); // set dummy with status FALSE
+                goto backup;
+            }
+            // create original.bin and write the binary to it
+            char* path = malloc(strlen(dir) + 15);
+            sprintf(path, "%s/original.bin", dir);
+            FILE* original_bin = fopen(path, "wb");
+            if (original_bin == NULL) {
+                fprintf(event_log, "[probe] can't-open %s\n", path);
+                funcmap_set(f,kernel_name, 0, 0, NULL, NULL, false, NULL, NULL, NULL); // set dummy with status FALSE
+                goto backup;
+            }
+            fwrite(bin, size, 1, original_bin);
+            fclose(original_bin);
+            fprintf(event_log, "[probe] write %s\n", path);
+            // create subprocess to run process.py, be aware of multi-processing
+            pid_t pid = fork();
+            if (pid < 0) {
+                fprintf(event_log, "[probe] can't-folk\n");
+                funcmap_set(f,kernel_name, 0, 0, NULL, NULL, false, NULL, NULL, NULL); // set dummy with status FALSE
+                goto backup;
+            } else if (pid == 0) { // child process, run python process.py kernel name
+                // python process.py <work_dir> <kernel_name>
+                execlp(NEUTRINO_PYTHON, NEUTRINO_PYTHON, NEUTRINO_PROBING_PY, dir, kernel_name, NULL);
+                exit(EXIT_FAILURE); // reach here only if exec error -> failure
+            } else { // parent process, wait for child
+                fprintf(event_log, "[probe] subproc %s %s %s %s\n", NEUTRINO_PYTHON, NEUTRINO_PROBING_PY, dir, kernel_name);
+                int status;
+                waitpid(pid, &status, 0);
+                if (status != EXIT_SUCCESS) { 
+                    fprintf(event_log, "[probe] python failed\n");
+                    funcmap_set(f,kernel_name, 0, 0, NULL, NULL, false, NULL, NULL, NULL); // set dummy with status FALSE
+                    goto backup; 
+                } else {
+                    fprintf(event_log, "[probe] python succeed\n");
+                }
+            }
+            // read the kernel.info from file system
+            sprintf(path, "%s/kernel.info", dir);
+            char* kernel_info = readf(path, "r");
+            // poor parser for kernel.info
+            // @todo add checking alignment
+            char* kernel_end = strchr(kernel_info, '\n');
+            *kernel_end = '\0';
+            kernel_name = kernel_info;
+            char* start = kernel_end + 1;
+            sscanf(start, " %d\n%d\n", &n_param, &n_probe);
+            // read sizes and types of probe 
+            probe_sizes = malloc(n_probe * sizeof(int));
+            probe_types = malloc(n_probe * sizeof(int));
+            char* strptr = strchr(strchr(start, '\n') + 1, '\n') + 1;
+            for (int idx = 0; idx < n_probe; idx++) {
+                sscanf(strptr, "%d,%d\n", &probe_types[idx], &probe_sizes[idx]);
+                strptr = strchr(strptr, '\n') + 1;
+            }
+            // // @note read process hook, not yet checked
+            // char* info_end = strchr(strptr, '\n');
+            // *info_end = '\0';
+            // callback = strptr;
+            // here read the 
+            fprintf(event_log, "[probe] read %s name %s n_param %d n_probe %d \n", path, kernel_name, n_param, n_probe);
+            // load probed.bin -> for collecting runtime info
+            sprintf(path, "%s/probed.bin", dir);
+            void* probed_bin = readf(path, "rb");
+            // load pruned.bin -> for benchmark
+            sprintf(path, "%s/pruned.bin", dir);
+            void* pruned_bin = readf(path, "rb");
+            // then load the binary to module
+            CUmodule probed_mod, pruned_mod;
+            // then get function with the SAME name -> we distinguish via Module
+            CUDA_CHECK(real_cuModuleLoadData(&probed_mod,  probed_bin));
+            CUDA_CHECK(real_cuModuleGetFunction(&probed, probed_mod, kernel_name));
+            CUDA_CHECK(real_cuModuleLoadData(&pruned_mod,  pruned_bin));
+            CUDA_CHECK(real_cuModuleGetFunction(&pruned, pruned_mod, kernel_name));
+            if (DYNAMIC) {
+                sprintf(path, "%s/countd.bin", dir);
+                void* countd_bin = readf(path, "rb");
+                CUmodule countd_mod;
+                CUDA_CHECK(real_cuModuleLoadData(&countd_mod,  countd_bin));
+                CUDA_CHECK(real_cuModuleGetFunction(&countd, countd_mod, kernel_name));
+            }
+            // add record to hashmap to avoid re-compile 
+            funcmap_set(f, kernel_name, n_param, n_probe, probe_sizes, probe_types, true, probed, pruned, countd);
+            fprintf(event_log, "[probe] finish %p name %s n_param %d\n", f, kernel_name, n_param);
+            fflush(event_log);
+            // free memory before we leave
+            free(dir);
+            free(path);
+            free(kernel_info);
+            free(probed_bin);
+            free(pruned_bin);
+            free(folder_name);
+            // don't free(probe_sizes) -> used by func-map!!!
+            succeed = true;
+        }
+    }
+    // expose the original param
+    fprintf(event_log, "[exec] funcmap-find %p %s\n", f, succeed ? "success" : "fail");
+    // check the jit status, if failed, goto backup
+    if (!succeed) { goto backup; }
+
+    // @bugfix add timestamp to match with readings from high-level integration (PyTorch)
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    long long time = ts.tv_nsec + ts.tv_sec * 1e9;
+    fprintf(event_log, "[exec] %lld param ", time);
+    for (int i = 0; i < n_param; i++) {
+        // @note print raw value -> help check raw number but mostly pointers...
+        fprintf(event_log, "%llx ", *(CUdeviceptr*)kernelParams[i]);
+    } 
+    fprintf(event_log, "\n");
+    fprintf(event_log, "[exec] grid %u %u %u block %u %u %u shared %u\n", 
+        config->gridDimX, config->gridDimY, config->gridDimZ, config->blockDimX, config->blockDimY, config->blockDimZ, config->sharedMemBytes);
+    fflush(event_log);
+
+    const size_t gridSize = config->gridDimX * config->gridDimY * config->gridDimZ;   
+    const size_t blockSize = config->blockDimX * config->blockDimY * config->blockDimZ;
+    const size_t warpSize = CDIV(blockSize, WARP_SIZE);
+    
+    /**
+     * Handling Dynamic Memory Size Requirements
+     * @bug  COUNT will not work for kernels with inplace modification, i.e., 
+     *       the computed result will pollute next launch, usually seen in the
+     *       decode kernels like topP/topK, please use a large enough constant
+     * @note We may turns to a ring buffer implementation for dynamic buffers,
+     *       but the trouble is how to have least interruption to frontned job
+     *       Particularly under the case that PCIe speed <<< Memory Bandwidth
+     * @todo Support Multiple Dynamic Buffer Allocation (by count many times)
+     */
+    if (DYNAMIC) { 
+        n_count = 1; // Let's support 1 dynamic first
+        // first set the attributes
+        CUDA_CHECK(real_cuFuncSetAttribute(countd, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, config->sharedMemBytes));
+        // second set the memory sizes
+        const size_t size_counter = gridSize * blockSize * sizeof(uint64_t);
+        uint64_t *h_counter = malloc(size_counter);
+        CUdeviceptr d_counter;
+        CUDA_CHECK(real_cuMemAlloc_v2(&d_counter, size_counter));
+        CUDA_CHECK(real_cuMemsetD32_v2(d_counter, 0, size_counter / 4UL));
+        void** count_args = malloc((n_param + 1) * sizeof(void*));
+        memcpy(count_args, kernelParams, n_param * sizeof(void*)); // copy the raw parameters
+        count_args[n_param] = &d_counter;
+        result = real_cuLaunchKernelEx(config, countd, count_args, extra);
+        // cuMemcpy is a blocked call
+        result = real_cuMemcpyDtoH_v2(h_counter, d_counter, size_counter);
+        if (result != CUDA_SUCCESS) 
+            goto backup;
+        for (int idx = 0; idx < gridSize * blockSize; idx++) 
+            count_size = (count_size > h_counter[idx]) ? count_size : h_counter[idx]; 
+        fprintf(event_log, "[count] size: %d \n", count_size);
+        // clean memory before we leave
+        free(h_counter);
+        free(count_args);
+        CUDA_CHECK(real_cuMemFree_v2(d_counter));
+    }
+
+    // here start to calculate memory size for every probe based on grid, block and probe_sizes
+    // formula similar to ndarray based on grid, block / warp
+    
+    size_t *probe_real_sizes = malloc(n_probe * sizeof(size_t));
+    size_t total_probe_sizes = 0;
+    for (int idx = 0; idx < n_probe; idx++) {
+        if (probe_types[idx] == PROBE_TYPE_THREAD) {
+            if (probe_sizes[idx] != -1) {
+                probe_real_sizes[idx] = gridSize * blockSize * probe_sizes[idx];
+                fprintf(event_log, "[exec] grid %zu block %zu probe %d total %zu\n", gridSize, blockSize, probe_sizes[idx], probe_real_sizes[idx]);
+            } else {
+                probe_real_sizes[idx] = gridSize * blockSize * count_size;
+                fprintf(event_log, "[exec] grid %zu block %zu probe %d total %zu\n", gridSize, blockSize, count_size, probe_real_sizes[idx]);
+            }
+        } else if (probe_types[idx] == PROBE_TYPE_WARP) {
+            probe_real_sizes[idx] = gridSize * warpSize * probe_sizes[idx];
+            fprintf(event_log, "[exec] grid %zu warp  %zu probe %d total %zu\n", gridSize, warpSize, probe_sizes[idx], probe_real_sizes[idx]);
+        }
+        total_probe_sizes += probe_real_sizes[idx];
+    }
+
+    fprintf(event_log, "[exec] probe-mem %zu (bytes)\n", total_probe_sizes);
+
+    // if NEUTRINO_MEMUSAGE, don't execute, just leave
+    if (NEUTRINO_MEMUSAGE) {
+        free(probe_real_sizes); // free the allocated
+        goto backup; 
+    }
+    
+    // Allocate Memory on Host and Device
+    void** h_probe_mems = malloc(n_probe * sizeof(void*));
+    CUdeviceptr* d_probe_mems = malloc(n_probe * sizeof(CUdeviceptr));
+    for (int idx = 0; idx < n_probe; idx++) {
+        h_probe_mems[idx] = malloc(probe_real_sizes[idx]);
+        CUDA_CHECK(real_cuMemAlloc_v2(&d_probe_mems[idx], probe_real_sizes[idx]));
+        CUDA_CHECK(real_cuMemsetD32_v2(d_probe_mems[idx], 0, probe_real_sizes[idx] / 4UL));
+    }
+    
+    // @note argument layout is (n_param + n_probe) * sizeof(void*), n_param is parsed inside ptx
+    void** probe_args = malloc((n_param + n_probe + n_count) * sizeof(void*));
+    // first copy the raw parameters
+    memcpy(probe_args, kernelParams, n_param * sizeof(void*)); 
+    for (int idx = 0; idx < n_probe; idx++) { 
+        probe_args[n_param + idx] = &d_probe_mems[idx]; // offset with n_param -> place later
+    }
+    for (int idx = 0; idx < n_count; idx++) {
+        probe_args[n_param + n_probe + idx] = &count_size; // similar offset
+    }
+    
+    /**
+     * @note set the shared memory size. If the kernel shared memory size exceed a limit (usually half) 
+     * of the physical SMEM size (per SM), then cuLaunchKernel will raise CUDA_ERROR_INVALID_VALUE, we
+     * need to manually set via cuFuncSetAttribute(kernel, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, shared)
+     * 
+     * @details Neutrino JIT Function is considered a new one and can not inherit original setup...
+     */
+    CUDA_CHECK(real_cuFuncSetAttribute(probed, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, config->sharedMemBytes));
+    if (NEUTRINO_BENCHMARK) {
+        real_cuMemsetD32_v2(benchmark_flush_mem,0, NEUTRINO_BENCHMARK_FLUSH_MEM_SIZE / 4UL);
+    }
+    CUDA_CHECK(real_cuEventRecord(end_event, config->hStream)); // use the stream specified in param
+    CUDA_CHECK(real_cuEventSynchronize(end_event));
+    CUDA_CHECK(real_cuEventElapsedTime(&prologue_time, start_event, end_event));
+    CUDA_CHECK(real_cuEventRecord(start_event, config->hStream)); // use the stream specified in param
+    // launch kernel by call real_cuLaunchKernel function
+    result = real_cuLaunchKernelEx(config, probed, probe_args, extra);
+    CUDA_CHECK(real_cuEventRecord(end_event, config->hStream)); // use the stream specified in param
+    CUDA_CHECK(real_cuEventSynchronize(end_event));     // kernel ends at this line
+    // calculate the real kernel time
+    CUDA_CHECK(real_cuEventElapsedTime(&kernel_time, start_event, end_event));
+    CUDA_CHECK(real_cuEventRecord(start_event, config->hStream)); // use the stream specified in param
+    if (result != CUDA_SUCCESS) {
+        for (int idx = 0; idx < n_probe; idx++) {
+            free(h_probe_mems[idx]);
+            CUDA_CHECK(real_cuMemFree_v2(d_probe_mems[idx]));
+        }
+        free(h_probe_mems);
+        free(d_probe_mems);
+        free(probe_real_sizes);
+        free(probe_args);
+        fprintf(event_log, "[exec] failed %d\n", result);
+        goto backup;
+    } else {
+        fprintf(event_log, "[exec] succeed %d\n", result);
+    }
+
+    // On benchmark, we don't save results because we're testing the kernel
+    if (NEUTRINO_BENCHMARK) { 
+        goto leave; 
+    }
+
+    /**
+     * Saving Trace to disk
+     * @todo Standardize this part in common.h because it's platform-agnostic!
+     */
+    for (int idx = 0; idx < n_probe; idx++) {
+        CUDA_CHECK(real_cuMemcpyDtoH_v2(h_probe_mems[idx], d_probe_mems[idx], probe_real_sizes[idx]));
+    }
+    // create dump file
+    char* DUMP_FILE_NAME = malloc(strlen(RESULT_DIR) + 20);
+    struct timespec end;
+    clock_gettime(CLOCK_REALTIME, &end);
+    double elapsed = ((end.tv_sec * 1e9 + end.tv_nsec) - (start.tv_sec * 1e9 + start.tv_nsec)) / 1e9;
+    sprintf(DUMP_FILE_NAME, "%s/%.6f.bin", RESULT_DIR, elapsed);
+    FILE *fp = fopen(DUMP_FILE_NAME, "wb");
+    if (!fp) { 
+        fprintf(event_log, "[exec] can't-save %s\n", DUMP_FILE_NAME); 
+        return CUDA_SUCCESS; 
+    }
+    // write header to file
+    trace_header_t header = { config->gridDimX, config->gridDimY, config->gridDimZ, config->blockDimX, config->blockDimY, config->blockDimZ, config->sharedMemBytes, n_probe };
+    fwrite(&header, sizeof(header), 1, fp);
+    // write sections to file
+    size_t offset = sizeof(header) + n_probe * sizeof(trace_section_t);
+    for (int idx = 0; idx < n_probe; idx++) {
+        trace_section_t section;
+        section.size = probe_sizes[idx] != -1 ? probe_sizes[idx] : count_size; 
+        section.warpDiv = (probe_types[idx] == PROBE_TYPE_WARP) ? WARP_SIZE : 1; 
+        section.offset = offset;
+        offset += gridSize * blockSize * section.size / section.warpDiv; 
+        fwrite(&section, sizeof(section), 1, fp);
+    }
+    // write data
+    for (int idx = 0; idx < n_probe; idx++) {
+        fwrite(h_probe_mems[idx], 1, probe_real_sizes[idx], fp);
+    }
+    // close file
+    fclose(fp);
+    fprintf(event_log, "[exec] save %s size %zu\n", DUMP_FILE_NAME, offset);
+    
+leave:
+    // on leave
+    // free allocated memory before leave
+    for (int idx = 0; idx < n_probe; idx++) {
+        free(h_probe_mems[idx]);
+        CUDA_CHECK(real_cuMemFree_v2(d_probe_mems[idx]));
+    }
+    CUDA_CHECK(real_cuEventRecord(end_event, config->hStream)); // use the stream specified in param
+    CUDA_CHECK(real_cuEventSynchronize(end_event));
+    CUDA_CHECK(real_cuEventElapsedTime(&epilogue_time, start_event, end_event));
+
+    if (NEUTRINO_BENCHMARK)  { 
+        // On benchmark mode, we 
+        // @note it seems this will launch a kernel implicitly to clear L2 cache
+        real_cuMemsetD32_v2(benchmark_flush_mem,0, NEUTRINO_BENCHMARK_FLUSH_MEM_SIZE / 4UL);
+        // here Neutrino use pruned ptx being compiled with exactly the same configuration (assmbler & optimization) with probed
+        float original_time;
+        CUDA_CHECK(real_cuFuncSetAttribute(pruned, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, config->sharedMemBytes));
+        CUDA_CHECK(real_cuEventRecord(start_event, config->hStream)); // use the stream specified in param
+        // launch original kernel with original parameter
+        result = real_cuLaunchKernelEx(config, pruned, kernelParams, extra);
+        CUDA_CHECK(real_cuEventRecord(end_event, config->hStream)); // use the stream specified in param
+        CUDA_CHECK(real_cuEventSynchronize(end_event));
+        // calculate the real kernel time
+        CUDA_CHECK(real_cuEventElapsedTime(&original_time, start_event, end_event));
+        fprintf(event_log, "[benchmark] prologue %f kernel %f epilogue %f original %f impact %f %d\n", prologue_time, kernel_time, epilogue_time, original_time, kernel_time / original_time, result);
+    } else {
+        // In normal mode, report the prologue, kernel, epilogue and impact ratio
+        fprintf(event_log, "[exec] prologue %f kernel %f epilogue %f ratio %f\n", prologue_time, kernel_time, epilogue_time, (prologue_time + kernel_time + epilogue_time) / kernel_time);
+        // Also create subprocess for analyze routine
+        if (NEUTRINO_CALLBACK && strlen(NEUTRINO_CALLBACK) >= 3 && strcmp(NEUTRINO_CALLBACK + strlen(NEUTRINO_CALLBACK) - 3, ".py") == 0) {
+            pid_t pid = fork();
+            if (pid < 0) {
+                fprintf(event_log, "[probe] can't-folk\n");
+            } else if (pid == 0) { // child process, run python process.py kernel name
+                // python process.py <work_dir> <kernel_name>
+                execlp(NEUTRINO_PYTHON, NEUTRINO_PYTHON, NEUTRINO_CALLBACK, DUMP_FILE_NAME, NULL);
+                exit(EXIT_FAILURE); // reach here only if exec error -> failure
+            } else { // parent process, wait for child
+                fprintf(event_log, "[callback] subproc %s %s %s\n", NEUTRINO_PYTHON, NEUTRINO_CALLBACK, DUMP_FILE_NAME);
+                int status;
+                waitpid(pid, &status, 0);
+                if (status != EXIT_SUCCESS) { 
+                    fprintf(event_log, "[callback] failed\n");
+                } else {
+                    fprintf(event_log, "[callback] succeed\n");
+                }
+            }
+        }
+        free(DUMP_FILE_NAME);
+    }
+    
+    free(h_probe_mems);
+    free(d_probe_mems);
+    free(probe_real_sizes);
+    free(probe_args);
+    fflush(event_log);   // make sure all logs are written before we go
+    return CUDA_SUCCESS; // reach here must be CUDA_SUCCESS
+
+backup:
+    // fall back to original version
+    fprintf(event_log, "[exec] backup %u %u %u block %u %u %u shared %u\n", config->gridDimX, config->gridDimY, config->gridDimZ, config->blockDimX, config->blockDimY, config->blockDimZ, config->sharedMemBytes);
+    result = real_cuLaunchKernelEx(config, f, kernelParams, extra);
+    fflush(event_log);
+    return result;
+}
+#endif
+
 /**
  * Memory API that helps debugging memory operation erros
  */
