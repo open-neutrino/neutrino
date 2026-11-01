@@ -130,11 +130,26 @@ def prune(ptx: str, entry_name: str) -> tuple[str, str, str, str]:
         start_func = ptx.find(".func", start_func)
         if start_func == -1:
             break
+        # A .func directive ending in ';' is a prototype such as
+        # `.extern .func foo(...);`, whose definition may sit in a later PTX
+        # image of the cuobjdump output. Skip it: taking the next '{' as its
+        # body would also capture unrelated text such as the Fatbin banner.
+        next_semicolon = ptx.find(";", start_func)
+        next_open = ptx.find("{", start_func)
+        if next_semicolon != -1 and (next_open == -1 or next_semicolon < next_open):
+            start_func = next_semicolon + 1
+            continue
+        if next_open == -1:
+            raise ValueError("PTX .func definition has no body")
         # function entry could be complicated, just keep them
-        pos = ptx.find("{", start_func) + 1
+        pos = next_open + 1
         ket_count = 1
         next_bra = ptx.find("{", pos)
+        if next_bra == -1: # not found, set to max := ptx length
+            next_bra = length
         next_ket = ptx.find("}", pos)
+        if next_ket == -1:
+            raise ValueError("unterminated PTX .func body")
         # now parse end
         while ket_count > 0:
             if next_bra < next_ket:
